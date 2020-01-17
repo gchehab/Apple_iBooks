@@ -1,7 +1,6 @@
 .git/
 .idea/
 .vs/
-.zipignore
 backports
 bkp
 calibre
