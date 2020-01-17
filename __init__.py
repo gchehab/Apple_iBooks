@@ -27,7 +27,7 @@ class InterfacePluginAppleBooks(InterfaceActionBase):
     author              = 'Guilherme Chehab'
     version             = (1, 0, 0)
     minimum_calibre_version = (3, 48, 0)
-    url                 = 'https://github.com/gchehab/apple_ibooks'
+    url                 = 'https://github.com/gchehab/Apple_iBooks'
 
     #: This field defines the GUI plugin class that contains all the code
     #: that actually does something. Its format is module_path:class_name
