@@ -1,0 +1,7 @@
+Apple iBooks Books sync
+===========================
+
+Created by Guilherme Chehab
+
+Requires calibre >= 3.48.0
+
