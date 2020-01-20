@@ -130,7 +130,8 @@ class BkLibraryDb:
                 )
                 for book in books:
                     collections = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter_by(
-                        Z_PK=book.ZCOLLECTION
+                        Z_PK=book.ZCOLLECTION,
+                        Z_ENT=1
                     )
 
                     self.__session.delete(book)
@@ -148,12 +149,13 @@ class BkLibraryDb:
             # Delete empty collections
             for collection_id in collection_ids:
                 collections = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter_by(
-                    ZCOLLECTIONID=collection_id
+                    ZCOLLECTIONID=collection_id,
+                    Z_ENT=1
                 )
 
                 for collection in collections:
                     book_count = self.__session.query(self.__base.classes.ZBKCOLLECTIONMEMBER).filter_by(
-                        ZCOLLECTION=collection.Z_PK
+                        ZCOLLECTION=collection.Z_PK,
                     ).count()
 
                     if book_count==0:
