@@ -112,9 +112,12 @@ class BkLibraryDb:
             books = self.__session.query(self.__base.classes.ZBKLIBRARYASSET).filter(
                 self.__base.classes.ZBKLIBRARYASSET.ZCOMMENTS.like("Calibre #%")
             )
+
             asset_ids = [book.ZASSETID for book in books]
-            series_ids = [book.ZSERIESID for book in books]
-            collection_ids = [book.ZCOLLECTIONID for book in books]
+            series_ids = [book.ZSERIESID for book in books] if\
+                hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSERIESID') else []
+            collection_ids = [book.ZCOLLECTIONID for book in books] if\
+                hasattr(self.__base.classes.ZBKLIBRARYASSET, 'ZCOLLECTIONID') else []
 
             count=0
             for book in books:
@@ -126,9 +129,23 @@ class BkLibraryDb:
                     ZASSETID=asset_id
                 )
                 for book in books:
+                    collections = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter_by(
+                        Z_PK=book.ZCOLLECTION
+                    )
+
                     self.__session.delete(book)
 
-            # Todo: Delete empty collections
+                    # Delete empty collections
+                    for collection in collections:
+                        book_count = self.__session.query(self.__base.classes.ZBKCOLLECTIONMEMBER).filter_by(
+                            ZCOLLECTION=collection.Z_PK
+                        ).count()
+
+                        if book_count == 0:
+                            print ("Delete Empty collection " + collection.ZTITLE)
+                            self.__session.delete(collection)
+
+            # Delete empty collections
             for collection_id in collection_ids:
                 collections = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter_by(
                     ZCOLLECTIONID=collection_id
@@ -190,7 +207,6 @@ class BkLibraryDb:
                 new_book = self.__base.classes.ZBKLIBRARYASSET(
                     Z_OPT=1,
                     Z_ENT=5,
-                    ZBOOKTYPE=1,
                     ZCANREDOWNLOAD=0,
                     ZCONTENTTYPE=1,
                     ZCOMMENTS='Calibre #' + str(book_id),
@@ -222,11 +238,22 @@ class BkLibraryDb:
                         uuid5(NAMESPACE_X500, (title + author).encode('ascii', 'ignore'))).upper(),
                     ZGENRE=genre,
                     ZDATASOURCEIDENTIFIER='com.apple.ibooks.plugin.Bookshelf.platformDataSource.BookKit',
-                    ZCOLLECTIONID=collection['ZCOLLECTIONID'],
                     ZAUTHOR=author,
                     ZSORTAUTHOR=author,
                     ZPATH=filepath
                 )
+
+                if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZBOOKTYPE'):
+                    new_book.ZBOOKTYPE=1
+
+                if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSERIESCONTAINER'):
+                    new_book.ZSERIESCONTAINER=series_id
+
+                if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZCOLLECTIONID'):
+                    new_book.ZCOLLECTIONID=collection['ZCOLLECTIONID']
+
+
+
                 self.__session.merge(new_book)
                 self.__session.commit()
 
