@@ -61,6 +61,8 @@ make dist
 <TODO>
 
 ## Todo list
+- [ ] Update Z_PRIMARYKEY -- if not, native adding new books break
+- [ ] Add book to library and default collections -- need from books 2.X upwards
 - [ ] Create installation instructions
 - [ ] Create safeguards against layout changes
 - [ ] Properly lock the Apple Books files during use
