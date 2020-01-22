@@ -45,6 +45,7 @@ class IbooksApi:
             self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
             self.__library_db = BkLibraryDb()
             self.__series_db = BkSeriesDb()
+            self.has_changed = 0
             #self.collections = self.__library_db.list_colections()
 
             # Kill any running ibooks process from the current user
@@ -74,10 +75,20 @@ class IbooksApi:
             print (sys.exc_info()[0])
             raise
 
-    # def __del__(self):
+    def __del__(self):
     #     self.observer.unschedule(self.stream)
     #     self.observer.stop()
     #     self.observer.join()
+
+        try:
+            if self.has_changed:
+                del self.__series_db
+                del self.__library_db
+                writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+
+        except Exception:
+            print (sys.exc_info()[0])
+            raise
 
     def add_book(self, book_id=None, title=None, collection=None, genre=None, is_explicit=None,
                  series_name=None, series_number=0, sequence_display_name=None,
@@ -131,14 +142,15 @@ class IbooksApi:
                         sequence_display_name = str(series_number/100) \
                             if sequence_display_name is None else sequence_display_name
 
-                        self.__series_db.add_book_to_series(series_name=series_name, series_id=series_adam_id,
-                                                            series_number=series_number, author=author,
-                                                            genre=genre, adam_id=asset_id, title=title)
+                        # self.__series_db.add_book_to_series(series_name=series_name, series_id=series_adam_id,
+                        #                                     series_number=series_number, author=author,
+                        #                                     genre=genre, adam_id=asset_id, title=title)
 
                     # Add book to database
-                    self.__library_db.add_book(book_id=book_id, title=title, collection_name=collection, filepath=output_path,
-                                               asset_id=asset_id, series_id=series_adam_id, series_number=series_number,
-                                               genre=genre, author=author, size=size)
+                    self.__library_db.add_book(book_id=book_id, title=title, collection_name=collection,
+                                               filepath=output_path, asset_id=asset_id, series_name=series_name,
+                                               series_id=series_adam_id, series_number=series_number, genre=genre,
+                                               author=author, size=size)
 
                     # Add asset to plist file
                     if asset_id not in [book['BKGeneratedItemId'] for book in self.catalog['Books']]:
@@ -196,6 +208,7 @@ class IbooksApi:
                             new_plist['seriesSequenceNumber'] = str(series_number)
                             new_plist['playlistName'] = series_name
 
+                    self.has_changed = 1
                     writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
 
                 else:

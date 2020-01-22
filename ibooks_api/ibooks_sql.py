@@ -13,7 +13,8 @@ from pprint import pprint
 
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, MetaData, Table, Column, ForeignKey, types, event, TypeDecorator, Unicode
+from sqlalchemy import create_engine, MetaData, Table, Column, ForeignKey, types, \
+    event, TypeDecorator, Unicode, or_, text
 from sqlalchemy.inspection import inspect
 
 from calibre_plugins.apple_ibooks.config import prefs
@@ -99,6 +100,13 @@ class BkLibraryDb:
             print (sys.exc_info()[0])
             raise
 
+    def __del__(self):
+        try:
+            self.__session.flush()
+            self.__session.commit()
+        except Exception:
+            self.__session.rollback()
+
     def list_books(self):
         """List all books in iBooks"""
         try:
@@ -175,37 +183,61 @@ class BkLibraryDb:
             raise
 
     def add_book(self, book_id=None, title=None, filepath=None, author=None, collection_name=None,
-                 asset_id=None, size=None, series_id=None, series_number=None, genre=None):
+                 asset_id=None, size=None, series_name=None, series_id=None, series_number=None, genre=None):
         """Add or update a book to the asset list in iBooks"""
         try:
-            collection = {}
+            pk_bklibraryasset = self.__session.query(self.__base.classes.Z_PRIMARYKEY).filter(
+                self.__base.classes.Z_PRIMARYKEY.Z_NAME == 'BKLibraryAsset'
+            ).limit(1).all()[0]
+
+            pk_bkcollectionmember = self.__session.query(self.__base.classes.Z_PRIMARYKEY).filter(
+                self.__base.classes.Z_PRIMARYKEY.Z_NAME == 'BKCollectionMember'
+            ).limit(1).all()[0]
+
+            # Todo: add new collections for each tag or category
+
+            # Create collections for series and collection
+            if series_name is not None:
+                new_collection = self.create_collection(collection_name=series_name)
+                self.__session.add(new_collection)
+                self.__session.flush()
+
             if collection_name is not None:
-                coll = self.create_collection(collection_name=collection_name)
-                collection['ZCOLLECTIONID'] = coll.ZCOLLECTIONID
-                collection['Z_PK'] = coll.Z_PK
-            else:
-                if ".pdf" in filepath.lower():
-                    collection['ZCOLLECTIONID'] = 'Pdfs_Collection_ID'
-                    collection['Z_PK'] = 2
-                else:
-                    collection['ZCOLLECTIONID'] = 'Books_Collection_ID'
-                    collection['Z_PK'] = 1
+                new_collection = self.create_collection(collection_name=collection_name)
+                self.__session.add(new_collection)
+                self.__session.flush()
+
+            default_collection_id = u'Pdfs_Collection_ID' if ".pdf" in filepath.lower() else u'Books_Collection_ID'
+            default_collection = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter(
+                self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == default_collection_id
+            ).limit(1).all()[0]
+            collections = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter(
+                or_(
+                    self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == u'All_Collection_ID',
+                    self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == default_collection.ZCOLLECTIONID,
+                    self.__base.classes.ZBKCOLLECTION.ZTITLE == collection_name,
+                    self.__base.classes.ZBKCOLLECTION.ZTITLE == series_name,
+                )
+            )
 
             # Check if file already on catalog, if so check if it is on the same collection
             result = self.__session.query(self.__base.classes.ZBKLIBRARYASSET).filter_by(
-                # ZTITLE=Title
                 ZASSETID=asset_id
             ).all()
 
             if len(result):
+                print ('Book already exists, updating database')
                 new_book = result[0]
                 new_book.ZAUTHOR = author
                 new_book.ZSERIESID = series_id
                 new_book.ZCOMMENTS = 'Calibre #' + str(book_id)
                 new_book.ZSERIESSORTKEY = series_number
-                self.__session.commit()
-                return result
+
+                self.__session.add(new_book)
+                self.__session.flush()
+
             else:
+                print ('Book is new, adding to database')
                 new_book = self.__base.classes.ZBKLIBRARYASSET(
                     Z_OPT=1,
                     Z_ENT=5,
@@ -252,30 +284,46 @@ class BkLibraryDb:
                     new_book.ZSERIESCONTAINER=series_id
 
                 if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZCOLLECTIONID'):
-                    new_book.ZCOLLECTIONID=collection['ZCOLLECTIONID']
+                    if collection_name is not None:
+                        new_book.ZCOLLECTIONID = new_collection.ZCOLLECTIONID
+                else:
+                    new_book.ZCOLLECTIONID = default_collection.ZCOLLECTIONID
 
+                self.__session.add(new_book)
+                self.__session.flush()
 
+                pk_bklibraryasset.Z_MAX = new_book.Z_PK
+                self.__session.add(pk_bklibraryasset)
+                self.__session.flush()
 
-                self.__session.merge(new_book)
-                self.__session.commit()
+            print (new_book.Z_PK)
 
-                # Check if file already on collection and add if not
-                result = self.__session.query(self.__base.classes.ZBKCOLLECTIONMEMBER).filter_by(
-                    # ZTITLE=Title
-                    ZASSETID=asset_id
+            for collection in collections:
+                print ("Adding book to collection: " + collection.ZTITLE)
+                collection_membership = self.__session.query(self.__base.classes.ZBKCOLLECTIONMEMBER).filter_by(
+                    ZASSETID=asset_id,
+                    ZCOLLECTION=collection.Z_PK
                 ).all()
-                if not len(result):
+                if not len(collection_membership):
                     new_collection_member = self.__base.classes.ZBKCOLLECTIONMEMBER(
                         Z_OPT=1,
-                        Z_ENT=1,
+                        Z_ENT=3,
                         ZSORTKEY=int(10000 + (0 if series_number is None else series_number)),
-                        ZCOLLECTION=collection['Z_PK'],
+                        ZCOLLECTION=collection.Z_PK,
                         ZASSETID=new_book.ZASSETID
                     )
-                    self.__session.merge(new_collection_member)
+                    if hasattr(self.__base.classes.ZBKCOLLECTIONMEMBER, 'ZASSET'):
+                        new_collection_member.ZASSET = new_book.Z_PK
 
-                self.__session.commit()
-                return new_book
+                    self.__session.add(new_collection_member)
+                    self.__session.flush()
+
+                    pk_bkcollectionmember.Z_MAX = new_collection_member.Z_PK
+                    self.__session.add(pk_bkcollectionmember)
+                    self.__session.flush()
+
+            self.__session.commit()
+            return new_book
         except Exception:
             self.__session.rollback()
             print (sys.exc_info()[0])
@@ -314,7 +362,16 @@ class BkLibraryDb:
                     ZSORTKEY=10000,
                 )
                 self.__session.add(new)
-                self.__session.commit()
+                self.__session.flush()
+
+                pk_bkcollection = self.__session.query(self.__base.classes.Z_PRIMARYKEY).filter(
+                    self.__base.classes.Z_PRIMARYKEY.Z_NAME == 'BKCollection'
+                ).limit(1).all()[0]
+
+                pk_bkcollection.Z_MAX = new.Z_PK
+                self.__session.add(pk_bkcollection)
+                self.__session.flush()
+
                 return new
 
         except Exception:
@@ -390,6 +447,13 @@ class BkSeriesDb:
             print (sys.exc_info()[0])
             raise
 
+    def __del__(self):
+        try:
+            self.__session.flush()
+            self.__session.commit()
+        except Exception:
+            self.__session.rollback()
+
     def list_series_items(self):
         """List all series in iBooks"""
         try:
@@ -462,13 +526,26 @@ class BkSeriesDb:
                         ZTITLE=series_name if is_container == 1 else title
                     )
 
-                self.__session.merge(new_series_checked)
-                self.__session.merge(new_series_item)
+                self.__session.add(new_series_checked)
+                self.__session.add(new_series_item)
+                self.__session.flush()
 
                 # Update indices
-                #for table in ['ZBKSERIESCHECK','ZBKSERIESITEM']:
+                pk_bkseriescheck = self.__session.query(self.__base.classes.Z_PRIMARYKEY).filter(
+                    self.__base.classes.Z_PRIMARYKEY.Z_NAME == 'BKSeriesCheck'
+                ).limit(1).all()[0]
 
-                self.__session.commit()
+                pk_bkseriescheck.Z_MAX = new_series_checked.Z_PK
+                self.__session.add(pk_bkseriescheck)
+
+                pk_bkseriesitem = self.__session.query(self.__base.classes.Z_PRIMARYKEY).filter(
+                    self.__base.classes.Z_PRIMARYKEY.Z_NAME == 'BKSeriesItem'
+                ).limit(1).all()[0]
+
+                pk_bkseriesitem.Z_MAX = new_series_item.Z_PK
+                self.__session.add(pk_bkseriesitem)
+
+                self.__session.flush()
 
                 is_container = 0
                 parent_id = series_id
