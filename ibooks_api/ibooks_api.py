@@ -42,12 +42,6 @@ class IbooksApi:
         # self.observer.schedule(self.stream)
 
         try:
-            self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
-            self.__library_db = BkLibraryDb()
-            self.__series_db = BkSeriesDb()
-            self.has_changed = 0
-            #self.collections = self.__library_db.list_colections()
-
             # Kill any running ibooks process from the current user
             for process in psutil.process_iter(attrs=['pid', 'name']):
                 if getuid() == process. uids()[1]:
@@ -55,17 +49,26 @@ class IbooksApi:
                         if 'Books.app' in process.cmdline()[0]:
                             try:
                                 process.terminate()
-                                process.wait(1)
+                                process.wait(5)
                             except Exception:
                                 process.kill()
                                 pass
                     if 'BKAgentService' in process.info['name']:
                         try:
                             process.terminate()
-                            process.wait(1)
+                            process.wait(5)
                         except Exception:
                             process.kill()
                             pass
+        except Exception:
+            raise
+
+        try:
+            print ("initializinb")
+            self.__library_db = BkLibraryDb()
+            self.__series_db = BkSeriesDb()
+            self.has_changed = 0
+            self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
 
         except (InvalidPlistException, NotBinaryPlistException), e:
             print "Not a plist:", e
@@ -142,9 +145,9 @@ class IbooksApi:
                         sequence_display_name = str(series_number/100) \
                             if sequence_display_name is None else sequence_display_name
 
-                        # self.__series_db.add_book_to_series(series_name=series_name, series_id=series_adam_id,
-                        #                                     series_number=series_number, author=author,
-                        #                                     genre=genre, adam_id=asset_id, title=title)
+                        self.__series_db.add_book_to_series(series_name=series_name, series_id=series_adam_id,
+                                                            series_number=series_number, author=author,
+                                                            genre=genre, adam_id=asset_id, title=title)
 
                     # Add book to database
                     self.__library_db.add_book(book_id=book_id, title=title, collection_name=collection,
@@ -157,20 +160,21 @@ class IbooksApi:
                         new_plist = {
                             'BKGeneratedItemId': asset_id,
                             'BKAllocatedSize': size,
+                            'BKBookType': u'epub' if ".epub" in input_path.lower() else u'pdf',
                             'BKDisplayName': path.basename(path.expanduser(input_path)),
                             'BKGenerationCount': 1,
                             'BKInsertionDate': int(time()),
-                            'BKPercentComplete': 1.0,
+                            'BKIsLocked': False,
+                            # 'BKPercentComplete': 1.0,
                             'comment': 'Calibre #' + str(book_id),
                             'artistName': author,
-                            'book-info': {'package-file-hash': book_hash},
-                            'explicit': False if is_explicit is None else bool(is_explicit),
-                            'genre': genre,
-                            'isPreview': False,
+                            # 'book-info': {'package-file-hash': book_hash},
+                            # 'explicit': False if is_explicit is None else bool(is_explicit),
+                            # 'genre': genre,
+                            # 'isPreview': False,
                             'itemName': title,
                             'path': path.expanduser(output_path),
                             'sourcePath': path.expanduser(input_path),
-                            'itemId': asset_id
                         }
 
                         # Add to series if needed
@@ -179,6 +183,7 @@ class IbooksApi:
                             new_plist['seriesTitle'] = series_name
                             new_plist['seriesSequenceNumber'] = str(series_number)
                             new_plist['playlistName'] = series_name
+                            new_plist['itemId'] = asset_id
 
                         self.catalog['Books'].append(new_plist)
 
@@ -199,7 +204,6 @@ class IbooksApi:
                         new_plist['itemName'] = title
                         new_plist['path'] = path.expanduser(output_path)
                         new_plist['sourcePath'] = path.expanduser(input_path)
-                        new_plist['itemId'] = asset_id
 
                         # Add to series if needed
                         if series_name is not None:
@@ -207,9 +211,10 @@ class IbooksApi:
                             new_plist['seriesTitle'] = series_name
                             new_plist['seriesSequenceNumber'] = str(series_number)
                             new_plist['playlistName'] = series_name
+                            new_plist['itemId'] = asset_id
 
                     self.has_changed = 1
-                    writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+                    #writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
 
                 else:
                     print ("File not found!")
@@ -232,12 +237,15 @@ class IbooksApi:
 
         for i in range(len(self.catalog['Books']) - 1, -1, -1):
             book = self.catalog['Books'][i]
+
+            if 'comment' not in book:
+                print str(i) + 'Book not added by calibre, skipping'
+                continue
+
             print str(i) + ": " + book['comment']
 
             if "Calibre #" in book['comment']:
                 file_path = book['path']
-                del (self.catalog['Books'][i])
-
                 if (path.isdir(file_path)):
                     try:
                         rmtree(file_path)
@@ -248,17 +256,20 @@ class IbooksApi:
                         remove(file_path)
                     except OSError:
                         pass
+
                 if 'seriesAdamId' in book:
                     adam_id = book['itemId']
                     print "Removed " +str(adam_id) + " from series table"
                     self.__series_db.del_book_from_series(adam_id=adam_id)
 
+                del (self.catalog['Books'][i])
+                self.has_changed=1
                 deleted += 1
 
         print "Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
               str(len(self.catalog['Books'])) + " books"
-        if deleted > 0:
-            writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+        # if deleted > 0:
+        #     writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
 
         return deleted
 
