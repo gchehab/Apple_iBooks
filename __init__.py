@@ -25,7 +25,7 @@ class InterfacePluginAppleBooks(InterfaceActionBase):
     file_types          = set(['epub', 'pdf'])
     on_postprocess      = True
     author              = 'Guilherme Chehab'
-    version             = (1, 0, 0)
+    version             = (0, 0, 1)
     minimum_calibre_version = (3, 48, 0)
     url                 = 'https://github.com/gchehab/Apple_iBooks'
 
