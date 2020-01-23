@@ -27,12 +27,19 @@ prefs.defaults['dbbookcatalog'] = \
 prefs.defaults['dbseriescatalog'] = \
     path.expanduser("~/Library/Containers/com.apple.iBooksX/Data/Documents/BKSeriesDatabase/BKSeries-1-012820141020.sqlite")
 
-prefs.defaults['backup'] = True
-prefs.defaults['debug'] = True
-prefs.defaults['remove_last_synced'] = True
+prefs.defaults['backup'] = False
+prefs.defaults['debug'] = False
+prefs.defaults['remove_last_synced'] = False
 
 class Ui_qWidget(object):
+
     def setupUi(self, qWidget):
+
+        # Hard code some preferences for now
+        prefs.defaults['backup'] = False
+        prefs.defaults['debug'] = False
+        prefs.defaults['remove_last_synced'] = False
+
         qWidget.setObjectName("qWidget")
         qWidget.resize(586, 409)
         self.fr_info = QtWidgets.QFrame(qWidget)
@@ -103,27 +110,27 @@ class Ui_qWidget(object):
         self.lb_url.setTextFormat(QtCore.Qt.RichText)
         self.lb_url.setOpenExternalLinks(True)
         self.lb_url.setObjectName("lb_url")
-        self.gb_generalsettings = QtWidgets.QGroupBox(qWidget)
-        self.gb_generalsettings.setGeometry(QtCore.QRect(320, 20, 261, 81))
-        self.gb_generalsettings.setObjectName("gb_generalsettings")
-        self.ck_backup = QtWidgets.QCheckBox(self.gb_generalsettings)
-        self.ck_backup.setGeometry(QtCore.QRect(20, 20, 241, 17))
-        self.ck_backup.setChecked(prefs['backup'])
-        self.ck_backup.setObjectName("ck_backup")
-        self.ck_cleanlast = QtWidgets.QCheckBox(self.gb_generalsettings)
-        self.ck_cleanlast.setGeometry(QtCore.QRect(20, 40, 241, 17))
-        self.ck_cleanlast.setChecked(prefs['remove_last_synced'])
-        self.ck_cleanlast.setObjectName("ch_cleanlast")
-        self.ck_debug = QtWidgets.QCheckBox(self.gb_generalsettings)
-        self.ck_debug.setGeometry(QtCore.QRect(20, 60, 241, 17))
-        self.ck_debug.setChecked(prefs['debug'])
-        self.ck_debug.setObjectName("ck_debug")
+        # self.gb_generalsettings = QtWidgets.QGroupBox(qWidget)
+        # self.gb_generalsettings.setGeometry(QtCore.QRect(320, 20, 261, 81))
+        # self.gb_generalsettings.setObjectName("gb_generalsettings")
+        # self.ck_backup = QtWidgets.QCheckBox(self.gb_generalsettings)
+        # self.ck_backup.setGeometry(QtCore.QRect(20, 20, 241, 17))
+        # self.ck_backup.setChecked(prefs['backup'])
+        # self.ck_backup.setObjectName("ck_backup")
+        # self.ck_cleanlast = QtWidgets.QCheckBox(self.gb_generalsettings)
+        # self.ck_cleanlast.setGeometry(QtCore.QRect(20, 40, 241, 17))
+        # self.ck_cleanlast.setChecked(prefs['remove_last_synced'])
+        # self.ck_cleanlast.setObjectName("ch_cleanlast")
+        # self.ck_debug = QtWidgets.QCheckBox(self.gb_generalsettings)
+        # self.ck_debug.setGeometry(QtCore.QRect(20, 60, 241, 17))
+        # self.ck_debug.setChecked(prefs['debug'])
+        # self.ck_debug.setObjectName("ck_debug")
 
         self.retranslateUi(qWidget)
         QtCore.QMetaObject.connectSlotsByName(qWidget)
-        qWidget.setTabOrder(self.ck_backup, self.ck_cleanlast)
-        qWidget.setTabOrder(self.ck_cleanlast, self.ck_debug)
-        qWidget.setTabOrder(self.ck_debug, self.ln_bookcatalog)
+        # qWidget.setTabOrder(self.ck_backup, self.ck_cleanlast)
+        # qWidget.setTabOrder(self.ck_cleanlast, self.ck_debug)
+        # qWidget.setTabOrder(self.ck_debug, self.ln_bookcatalog)
         qWidget.setTabOrder(self.ln_bookcatalog, self.tb_findbookcatalog)
         qWidget.setTabOrder(self.tb_findbookcatalog, self.ln_dbbookcatalog)
         qWidget.setTabOrder(self.ln_dbbookcatalog, self.tb_finddbbookcatalog)
@@ -151,10 +158,10 @@ class Ui_qWidget(object):
         self.tb_finddbbookcatalog.setText(_translate("qWidget", "..."))
         self.tb_finddbseriescatalog.setText(_translate("qWidget", "..."))
         self.lb_url.setText(_translate("qWidget", "<a href=\"https://github.com/gchehab/apple_ibooks\">https://github.com/gchehab/apple_ibooks</a>"))
-        self.gb_generalsettings.setTitle(_translate("qWidget", "General Settings"))
-        self.ck_backup.setText(_translate("qWidget", "Backup on database on sync"))
-        self.ck_cleanlast.setText(_translate("qWidget", "Remove last synced books"))
-        self.ck_debug.setText(_translate("qWidget", "Debug information on log"))
+        # self.gb_generalsettings.setTitle(_translate("qWidget", "General Settings"))
+        # self.ck_backup.setText(_translate("qWidget", "Backup on database on sync"))
+        # self.ck_cleanlast.setText(_translate("qWidget", "Remove last synced books"))
+        # self.ck_debug.setText(_translate("qWidget", "Debug information on log"))
 
         # Check if files are there and disable searching if they are
         if path.isfile(prefs['bookcatalog']):
@@ -210,7 +217,7 @@ class ConfigWidget(QWidget):
         prefs['bookcatalog'] = self.ui.ln_bookcatalog.text()
         prefs['dbbookcatalog'] = self.ui.ln_dbbookcatalog.text()
         prefs['dbseriescatalog'] = self.ui.ln_dbseriescatalog.text()
-        prefs['backup'] = self.ui.ck_backup.isChecked()
-        prefs['debug'] = self.ui.ck_debug.isChecked()
-        prefs['remove_last_synced'] = self.ui.ck_cleanlast.isChecked()
+        # prefs['backup'] = self.ui.ck_backup.isChecked()
+        # prefs['debug'] = self.ui.ck_debug.isChecked()
+        # prefs['remove_last_synced'] = self.ui.ck_cleanlast.isChecked()
         print ('update sesttings')
