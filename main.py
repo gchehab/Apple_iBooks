@@ -76,24 +76,24 @@ class MainDialog(QDialog):
         self.lb_product_name.setObjectName("lb_product_name")
         self.h.addWidget(self.fr_info)
 
-        self.gb_generalsettings = QtWidgets.QGroupBox(self)
-        self.gb_generalsettings.setGeometry(QtCore.QRect(320, 20, 261, 81))
-        self.gb_generalsettings.setObjectName("gb_generalsettings")
-        self.gb_generalsettings.setEnabled(False)
-        self.ck_backup = QtWidgets.QCheckBox(self.gb_generalsettings)
-        self.ck_backup.setGeometry(QtCore.QRect(20, 20, 241, 17))
-        self.ck_backup.setObjectName("ck_backup")
-        self.ck_backup.setEnabled(False)
-        self.ck_cleanlast = QtWidgets.QCheckBox(self.gb_generalsettings)
-        self.ck_cleanlast.setObjectName("ch_cleanlast")
-        self.ck_cleanlast.setGeometry(QtCore.QRect(20, 40, 241, 17))
-        self.ck_cleanlast.setEnabled(False)
-        self.ck_debug = QtWidgets.QCheckBox(self.gb_generalsettings)
-        self.ck_debug.setGeometry(QtCore.QRect(20, 60, 241, 17))
-        self.ck_debug.setObjectName("ck_debug")
-        self.ck_debug.setEnabled(False)
+        # self.gb_generalsettings = QtWidgets.QGroupBox(self)
+        # self.gb_generalsettings.setGeometry(QtCore.QRect(320, 20, 261, 81))
+        # self.gb_generalsettings.setObjectName("gb_generalsettings")
+        # self.gb_generalsettings.setEnabled(False)
+        # self.ck_backup = QtWidgets.QCheckBox(self.gb_generalsettings)
+        # self.ck_backup.setGeometry(QtCore.QRect(20, 20, 241, 17))
+        # self.ck_backup.setObjectName("ck_backup")
+        # self.ck_backup.setEnabled(False)
+        # self.ck_cleanlast = QtWidgets.QCheckBox(self.gb_generalsettings)
+        # self.ck_cleanlast.setObjectName("ch_cleanlast")
+        # self.ck_cleanlast.setGeometry(QtCore.QRect(20, 40, 241, 17))
+        # self.ck_cleanlast.setEnabled(False)
+        # self.ck_debug = QtWidgets.QCheckBox(self.gb_generalsettings)
+        # self.ck_debug.setGeometry(QtCore.QRect(20, 60, 241, 17))
+        # self.ck_debug.setObjectName("ck_debug")
+        # self.ck_debug.setEnabled(False)
 
-        self.h.addWidget(self.gb_generalsettings)
+        # self.h.addWidget(self.gb_generalsettings)
 
         self.l.addWidget(self.fr_header)
 
@@ -177,13 +177,13 @@ class MainDialog(QDialog):
                                                    str(InterfacePluginAppleBooks.version[0]) + "." +
                                                    str(InterfacePluginAppleBooks.version[1]) + "." +
                                                    str(InterfacePluginAppleBooks.version[2]) + "."))
-        self.gb_generalsettings.setTitle(_translate("qWidget", "General Settings"))
-        self.ck_backup.setChecked(prefs['backup'])
-        self.ck_backup.setText(_translate("qWidget", "Backup on database on sync"))
-        self.ck_cleanlast.setChecked(prefs['remove_last_synced'])
-        self.ck_cleanlast.setText(_translate("qWidget", "Remove last synced books"))
-        self.ck_debug.setChecked(prefs['debug'])
-        self.ck_debug.setText(_translate("qWidget", "Debug information on log"))
+        # self.gb_generalsettings.setTitle(_translate("qWidget", "General Settings"))
+        # self.ck_backup.setChecked(prefs['backup'])
+        # self.ck_backup.setText(_translate("qWidget", "Backup on database on sync"))
+        # self.ck_cleanlast.setChecked(prefs['remove_last_synced'])
+        # self.ck_cleanlast.setText(_translate("qWidget", "Remove last synced books"))
+        # self.ck_debug.setChecked(prefs['debug'])
+        # self.ck_debug.setText(_translate("qWidget", "Debug information on log"))
         if (self.is_sync_selected):
             self.ck_syncSelected.setText(_translate("qWidget", "Sync selected books only (" +
                                                 str(len(self.selected_book_ids)) + " books)"))
@@ -277,6 +277,8 @@ class MainDialog(QDialog):
                 QtCore.QCoreApplication.instance().processEvents()
 
             # End sync
+            del ibooks
+
             self.pb_progressBar.setProperty("value", 100)
             self.lw_log.insertItem(0, str(datetime.now()) + ": Finished Sync")
             self.buttonBox.setEnabled(True)
