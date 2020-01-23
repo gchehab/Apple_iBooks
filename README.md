@@ -5,7 +5,9 @@
 This software is on initial development stage and should be considered highly unstable. It messes directly with 
 the undocumented files Apple application files, and that may cause their corruption, rendering the applications unusable.
 
-**USE AT YOUR OWN RISK**
+**In the present state it can create database inconsistences rendering Apple iBooks/Books unusable (only recoverable through working backup - USE AT YOUR OWN RISK**
+
+It only has been tested with Apple iBooks 1.15 (Macos 10.13) and Apple Books 2.2 (Macos 10.15). 
 
 ## License
 
@@ -61,8 +63,8 @@ make dist
 <TODO>
 
 ## Todo list
-- [ ] Update Z_PRIMARYKEY -- if not, native adding new books break
-- [ ] Add book to library and default collections -- need from books 2.X upwards
+- [X] ~Update Z_PRIMARYKEY -- if not, native adding new books break~
+- [X] ~Add book to library and default collections -- need from books 2.X upwards~
 - [ ] Create installation instructions
 - [ ] Create safeguards against layout changes
 - [ ] Properly lock the Apple Books files during use
@@ -71,7 +73,9 @@ make dist
 - [ ] Implement backup option
 - [ ] Create undo, backup restore
 - [ ] Allow interrupt during sync
-- [ ] Remove empty collections and series from ibooks (hard to figure the ones created from calibre) 
+- [X] ~Remove empty collections and series from ibooks (hard to figure the ones created from calibre)~
+- [ ] Series book grouping is not always working properly
+- [ ] Figure out how to treat series entries added by BKAgent to series collections
 
 
 ## Help the developer
