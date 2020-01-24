@@ -74,10 +74,10 @@ make dist
 - [ ] Create undo, backup restore
 - [ ] Allow interrupt during sync
 - [X] ~Remove empty collections and series from ibooks (hard to figure the ones created from calibre)~
-- [ ] Review series book grouping (disabled for now), as it seems to use storeID, iBooks thinks that all 
+- [X] ~Review series book grouping (disabled for now), as it seems to use storeID, iBooks thinks that all 
     grouped books were bought from apple store and has issues deleting them. Besides, it does not seem
-     to be working consistently
-- [ ] Figure out how to treat series entries added by BKAgent to series collections
+     to be working consistently~
+- [X] ~Figure out how to treat series entries added by BKAgent to series collections~
 - [ ] Add paypal information on the plugin and its document should anyone find it usefull
 
 
