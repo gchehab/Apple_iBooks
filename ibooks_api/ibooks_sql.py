@@ -167,14 +167,17 @@ class BkLibraryDb:
                 self.__session.flush()
 
             default_collection_id = u'Pdfs_Collection_ID' if ".pdf" in filepath.lower() else u'Books_Collection_ID'
-            default_collection = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter(
+            result = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter(
                 self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == default_collection_id
-            ).limit(1).all()[0]
+            ).limit(1).all()
+
+            if len(result):
+                default_collection = result[0]
 
             collections = self.__session.query(self.__base.classes.ZBKCOLLECTION).filter(
                 or_(
                     self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == u'All_Collection_ID',
-                    self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == default_collection.ZCOLLECTIONID,
+                    self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == default_collection_id,
                     self.__base.classes.ZBKCOLLECTION.ZCOLLECTIONID == u'All_Calibre_ID',
                     self.__base.classes.ZBKCOLLECTION.ZTITLE == collection_name,
                     self.__base.classes.ZBKCOLLECTION.ZTITLE == series_name,
@@ -245,8 +248,8 @@ class BkLibraryDb:
                     new_book.ZSERIESCONTAINER=series_id
 
                 # Seems to enable proper series grouping, however creates a lot of issues with book deletion
-                # if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSTOREID'):
-                #     new_book.ZSTOREID=asset_id
+                if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSTOREID'):
+                    new_book.ZSTOREID=0 # asset_id
 
                 if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZCOLLECTIONID'):
                     if collection_name is not None:

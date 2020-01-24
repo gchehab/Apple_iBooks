@@ -220,4 +220,5 @@ class ConfigWidget(QWidget):
         # prefs['backup'] = self.ui.ck_backup.isChecked()
         # prefs['debug'] = self.ui.ck_debug.isChecked()
         # prefs['remove_last_synced'] = self.ui.ck_cleanlast.isChecked()
-        print ('update sesttings')
+        if prefs['debug']:
+            print ('update settings')

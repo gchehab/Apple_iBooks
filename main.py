@@ -285,15 +285,15 @@ class MainDialog(QDialog):
 
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key_Escape:
-            print("esc")
             if 0 < self.pb_progressBar.value() < 100:
-                print("Sync in progress, cannot close")
+                if prefs['debug']:
+                    print("Sync in progress, cannot close")
             else:
                 event.accept()
 
     def closeEvent(self, event):
-        print ("User has clicked the red x on the main window")
         if 0 < self.pb_progressBar.value() < 100:
-            print ("Sync in progress, cannot close")
+            if prefs['debug']:
+                print ("Sync in progress, cannot close")
         else:
             event.accept()
