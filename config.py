@@ -34,12 +34,6 @@ prefs.defaults['remove_last_synced'] = False
 class Ui_qWidget(object):
 
     def setupUi(self, qWidget):
-
-        # Hard code some preferences for now
-        prefs.defaults['backup'] = False
-        prefs.defaults['debug'] = False
-        prefs.defaults['remove_last_synced'] = False
-
         qWidget.setObjectName("qWidget")
         qWidget.resize(586, 409)
         self.fr_info = QtWidgets.QFrame(qWidget)

@@ -268,7 +268,8 @@ class BkLibraryDb:
                 # self.__session.add(pk_bklibraryasset)
                 # self.__session.flush()
 
-            print (new_book.Z_PK)
+            if prefs['debug']:
+                print (new_book.Z_PK)
 
             for collection in collections:
                 if prefs['debug']:

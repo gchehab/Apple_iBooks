@@ -25,6 +25,11 @@ from pprint import pprint
 
 class MainDialog(QDialog):
     def __init__(self, gui, icon, do_user_config, selected_book_ids, is_sync_selected):
+        # Hard code some preferences for now
+        prefs['backup'] = False
+        prefs['debug'] = True
+        prefs['remove_last_synced'] = False
+
         QDialog.__init__(self, gui)
         self.qDialog = QDialog
         self.gui = gui
