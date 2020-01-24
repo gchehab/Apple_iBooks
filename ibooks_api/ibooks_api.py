@@ -78,7 +78,8 @@ class IbooksApi:
             self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
 
         except (InvalidPlistException, NotBinaryPlistException), e:
-            print "Not a plist:", e
+            if prefs['debug']:
+                print "Not a plist:", e
             raise
 
         except Exception:
@@ -127,7 +128,8 @@ class IbooksApi:
                                     size += member.file_size
                                     epub_file.extractall(path.expanduser(output_path))
                         except Exception:
-                            print ("Cannot extract file to destination")
+                            if prefs['debug']:
+                                print ("Cannot extract file to destination")
                             print (sys.exc_info()[0])
                             raise
                     else:
@@ -136,7 +138,8 @@ class IbooksApi:
                         try:
                             copy2(path.expanduser(input_path), path.expanduser(output_path))
                         except Exception:
-                            print ("Cannot copy file to destination")
+                            if prefs['debug']:
+                                print ("Cannot copy file to destination")
                             print (sys.exc_info()[0])
                             raise
 
@@ -225,12 +228,14 @@ class IbooksApi:
                     #writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
 
                 else:
-                    print ("File not found!")
+                    if prefs['debug']:
+                        print ("File not found!")
                     print (sys.exc_info()[0])
                     return -1
 
             else:
-                print ("Path is invalid")
+                if prefs['debug']:
+                    print ("Path is invalid")
                 return -1
 
         except Exception:
@@ -247,10 +252,12 @@ class IbooksApi:
             book = self.catalog['Books'][i]
 
             if 'comment' not in book:
-                print str(i) + 'Book not added by calibre, skipping'
+                if prefs['debug']:
+                    print str(i) + 'Book not added by calibre, skipping'
                 continue
 
-            print str(i) + ": " + book['comment']
+            if prefs['debug']:
+                print str(i) + ": " + book['comment']
 
             if "Calibre #" in book['comment']:
                 file_path = book['path']
@@ -267,14 +274,16 @@ class IbooksApi:
 
                 if 'seriesAdamId' in book:
                     adam_id = book['itemId']
-                    print "Removed " +str(adam_id) + " from series table"
+                    if prefs['debug']:
+                        print "Removed " +str(adam_id) + " from series table"
                     self.__series_db.del_book_from_series(adam_id=adam_id)
 
                 del (self.catalog['Books'][i])
                 self.has_changed=1
                 deleted += 1
 
-        print "Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
+        if prefs['debug']:
+            print "Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
               str(len(self.catalog['Books'])) + " books"
         # if deleted > 0:
         #     writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
@@ -293,4 +302,5 @@ class IbooksApi:
 
     @staticmethod
     def observer_callback(file_event):
-        pprint(file_event)
+        if prefs['debug']:
+            pprint(file_event)

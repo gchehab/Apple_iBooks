@@ -63,13 +63,15 @@ def update_pks(session, base):
     try:
         session.flush()
         pks = session.query(base.classes.Z_PRIMARYKEY).all()
-        print ("Update pks for " + str(len(pks)) + " tables")
+        if prefs['debug']:
+            print ("Update pks for " + str(len(pks)) + " tables")
         for pk in pks:
             z_name = pk.Z_NAME
             class_name = "Z" + str(z_name).upper()
             max_pk = session.query(func.max(base.classes[class_name].Z_PK)).limit(1).all()[0][0]
             pk.Z_MAX = max_pk if max_pk is not None else 0
-            print ("Pk for " + z_name + " is " + str(max_pk))
+            if prefs['debug']:
+                print ("Pk for " + z_name + " is " + str(max_pk))
             session.add(pk)
         session.flush()
     except Exception:
@@ -190,7 +192,8 @@ class BkLibraryDb:
             ).all()
 
             if len(result):
-                print ('Book already exists, updating database')
+                if prefs['debug']:
+                    print ('Book already exists, updating database')
                 new_book = result[0]
                 new_book.ZAUTHOR = author
                 new_book.ZSERIESID = series_id
@@ -201,7 +204,8 @@ class BkLibraryDb:
                 self.__session.flush()
 
             else:
-                print ('Book is new, adding to database')
+                if prefs['debug']:
+                    print ('Book is new, adding to database')
                 new_book = self.__base.classes.ZBKLIBRARYASSET(
                     Z_OPT=1,
                     Z_ENT=5,
@@ -267,7 +271,8 @@ class BkLibraryDb:
             print (new_book.Z_PK)
 
             for collection in collections:
-                print ("Adding book to collection: " + collection.ZTITLE)
+                if prefs['debug']:
+                    print ("Adding book to collection: " + collection.ZTITLE)
                 collection_membership = self.__session.query(self.__base.classes.ZBKCOLLECTIONMEMBER).filter_by(
                     ZASSETID=asset_id,
                     ZCOLLECTION=collection.Z_PK
@@ -333,7 +338,8 @@ class BkLibraryDb:
                         ).count()
 
                         if book_count == 0:
-                            print ("Delete Empty collection " + collection.ZTITLE)
+                            if prefs['debug']:
+                                print ("Delete Empty collection " + collection.ZTITLE)
                             self.__session.delete(collection)
 
             # Delete empty collections
@@ -349,14 +355,16 @@ class BkLibraryDb:
                     ).count()
 
                     if book_count==0:
-                        print ("Delete Empty collection " + collection.ZTITLE)
+                        if prefs['debug']:
+                            print ("Delete Empty collection " + collection.ZTITLE)
                         self.__session.delete(collection)
 
             # Todo: reset primary keys to max of remaining itens
 
             # self.__session.commit()
-            print "Books in library assets table: " + str(count)
-            print "Books in collection member table: " + str(len(asset_ids))
+            if prefs['debug']:
+                print "Books in library assets table: " + str(count)
+                print "Books in collection member table: " + str(len(asset_ids))
             return len(asset_ids)
 
         except Exception:
@@ -618,7 +626,8 @@ class BkSeriesDb:
                     ZADAMID=adam_id
                 )
                 for book in books:
-                    print(book.ZADAMID)
+                    if prefs['debug']:
+                        print(book.ZADAMID)
                     self.__session.delete(book)
 
                 # Delete empty series

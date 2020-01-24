@@ -96,7 +96,6 @@ class InterfacePlugin(InterfaceAction):
         MainDialog(self.gui, self.qaction.icon(), do_user_config, selected_book_ids, is_sync_selected).show()
 
     def update_menu(self):
-        print ('update menu?')
         rows = self.gui.library_view.selectionModel().selectedRows()
         self.sync_selected_action.setEnabled(len(rows) > 0)
 

@@ -240,12 +240,6 @@ class MainDialog(QDialog):
                         mi = self.db.get_metadata(book_id, get_cover=False, cover_as_data=False)
                         fmt = 'EPUB' if 'EPUB' in fmts else 'PDF'
                         file_path = self.db.format_abspath(book_id, fmt)
-                        # print (mi.title)
-                        # print (', '.join(map(str,mi.authors)))
-                        # print (mi.series)
-                        # print (mi.series_index)
-                        # #print (mi.collection)
-                        # print (file_path)
 
                         ibooks.add_book(
                             book_id=book_id,
