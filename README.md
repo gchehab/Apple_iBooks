@@ -78,7 +78,9 @@ make dist
     grouped books were bought from apple store and has issues deleting them. Besides, it does not seem
      to be working consistently~
 - [X] ~Figure out how to treat series entries added by BKAgent to series collections~
-- [ ] Add paypal information on the plugin and its document should anyone find it usefull
+- [ ] Add paypal information on the plugin and its document should anyone find it useful
+- [ ] Better management of unziped packages on temporary file -- add version controlled mechanism
+- [ ] Change make dist to add version and release on the zip file
 
 
 ## Help the developer
