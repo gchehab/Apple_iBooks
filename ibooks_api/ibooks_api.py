@@ -32,15 +32,8 @@ class IbooksApi:
         with file_to_read:
             return file_to_read.read()
 
-    def __init__(self):
-
-        # # Start file watcher to ensure no one else opens database files -- maybe add something to lock them
-        # self.observer = Observer()
-        # self.observer.start()
-
-        # self.stream = Stream(self.ObserverCallback, IBOOKS_BKAGENT_CATALOG_FILE, file_events=True )
-        # self.observer.schedule(self.stream)
-
+    @staticmethod
+    def __kill_ibooks():
         try:
             # Kill any running ibooks process from the current user
             for process in psutil.process_iter(attrs=['pid', 'name']):
@@ -63,8 +56,22 @@ class IbooksApi:
         except Exception:
             raise
 
+
+    def __init__(self):
+
+        # # Start file watcher to ensure no one else opens database files -- maybe add something to lock them
+        # self.observer = Observer()
+        # self.observer.start()
+
+        # self.stream = Stream(self.ObserverCallback, IBOOKS_BKAGENT_CATALOG_FILE, file_events=True )
+        # self.observer.schedule(self.stream)
+
         try:
-            print ("initializinb")
+            self.__kill_ibooks()
+        except Exception:
+            raise
+
+        try:
             self.__library_db = BkLibraryDb()
             self.__series_db = BkSeriesDb()
             self.has_changed = 0
@@ -84,9 +91,10 @@ class IbooksApi:
     #     self.observer.join()
 
         try:
+            self.__kill_ibooks()
             if self.has_changed:
-                del self.__series_db
                 del self.__library_db
+                del self.__series_db
                 writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
 
         except Exception:
@@ -149,7 +157,6 @@ class IbooksApi:
                                                             series_number=series_number, author=author,
                                                             genre=genre, adam_id=asset_id, title=title)
 
-                    # Add book to database
                     self.__library_db.add_book(book_id=book_id, title=title, collection_name=collection,
                                                filepath=output_path, asset_id=asset_id, series_name=series_name,
                                                series_id=series_adam_id, series_number=series_number, genre=genre,
@@ -194,13 +201,14 @@ class IbooksApi:
                         ]
                         new_plist['BKAllocatedSize'] = size
                         new_plist['BKDisplayName'] = path.basename(path.expanduser(input_path)),
+                        new_plist['BKBookType'] = u'epub' if ".epub" in input_path.lower() else u'pdf',
                         new_plist['BKGenerationCount'] += 1
                         new_plist['BKInsertionDate'] = int(time())
                         new_plist['comment'] = 'Calibre #' + str(book_id)
                         new_plist['artistName'] = author
-                        new_plist['book-info'] = {'package-file-hash': book_hash}
-                        new_plist['explicit'] = False if is_explicit is None else bool(is_explicit),
-                        new_plist['genre'] = genre
+                        # new_plist['book-info'] = {'package-file-hash': book_hash}
+                        # new_plist['explicit'] = False if is_explicit is None else bool(is_explicit),
+                        # new_plist['genre'] = genre
                         new_plist['itemName'] = title
                         new_plist['path'] = path.expanduser(output_path)
                         new_plist['sourcePath'] = path.expanduser(input_path)

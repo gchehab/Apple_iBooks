@@ -244,8 +244,9 @@ class BkLibraryDb:
                 if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSERIESCONTAINER'):
                     new_book.ZSERIESCONTAINER=series_id
 
-                if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSTOREID'):
-                    new_book.ZSTOREID=asset_id
+                # Seems to enable proper series grouping, however creates a lot of issues with book deletion
+                # if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZSTOREID'):
+                #     new_book.ZSTOREID=asset_id
 
                 if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZCOLLECTIONID'):
                     if collection_name is not None:
@@ -564,7 +565,7 @@ class BkSeriesDb:
                         ZTITLE=series_name if is_container == 1 else title
                     )
 
-                #self.__session.add(new_series_checked)
+                self.__session.add(new_series_checked)
                 self.__session.add(new_series_item)
                 self.__session.flush()
 
