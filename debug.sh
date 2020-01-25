@@ -1,5 +1,5 @@
 #!/bin/bash
-PATH=/Applications/calibre.app/Contents/console.app/Contents/MacOS/:$PATH
+PATH=/Applications/calibre.app/Contents/console.app/Contents/MacOS/:/Applications/calibre.app/Contents/MacOS/:$PATH
 
 while [ `ps -ef | grep calibre-debug | grep -v grep | wc -l ` != "0" ]; do
 	calibre-debug -s
@@ -8,11 +8,14 @@ done
 
 find . -type l -delete
 calibre-customize -b `pwd`
-for i in `echo ../calibre-src/src/*` ; do ln -s $i ;done
+if [ -d ../calibre-src/src ] ; then
+	for i in `echo ../calibre-src/src/*` ; do ln -s $i ;done
+fi
+
 #open /Applications/calibre.app
 clear
 echo ----- Restarting Calibre -----
-/Applications/calibre.app/Contents/calibre-debug.app/Contents/MacOS/calibre-debug -g &
+calibre-debug -g &
 sleep 2
 
 while [ 1 ] ; do
@@ -27,7 +30,7 @@ while [ 1 ] ; do
 	#open /Applications/calibre.app
 	clear
 	echo ----- Restarting Calibre -----
-	/Applications/calibre.app/Contents/calibre-debug.app/Contents/MacOS/calibre-debug -g &
+	calibre-debug -g &
 	sleep 1
 done
 
