@@ -65,6 +65,7 @@ make dist
 ## Todo list
 - [ ] Remove psutil dependency as it distributes binary that may not work on all mac os versions
 - [ ] Figure a way to transfer calibre covers that are not embeded in the book file
+- [ ] Tune performance to be able to sync some few thousand books in a single shot
 - [X] ~Update Z_PRIMARYKEY -- if not, native adding new books break~
 - [X] ~Add book to library and default collections -- need from books 2.X upwards~
 - [ ] Create installation instructions
