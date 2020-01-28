@@ -121,13 +121,18 @@ class BkLibraryDb:
             raise
 
 
-
     def __del__(self):
+        self.commit()
+
+    def commit(self):
         try:
-            update_pks(self.__session,self.__base)
+            update_pks(self.__session, self.__base)
             self.__session.flush()
             self.__session.commit()
+
         except Exception:
+            print (sys.exc_info()[0])
+
             self.__session.rollback()
 
     def list_books(self):
@@ -242,7 +247,8 @@ class BkLibraryDb:
                     ZDATASOURCEIDENTIFIER='com.apple.ibooks.plugin.Bookshelf.platformDataSource.BookKit',
                     ZAUTHOR=author,
                     ZSORTAUTHOR=author,
-                    ZPATH=filepath
+                    ZPATH=filepath,
+                    # ZCOVERURL='file:/tmp/cover.jpg'
                 )
 
                 if hasattr(self.__base.classes.ZBKLIBRARYASSET,'ZBOOKTYPE'):
@@ -498,11 +504,16 @@ class BkSeriesDb:
             raise
 
     def __del__(self):
+        self.commit()
+
+    def commit(self):
         try:
-            update_pks(self.__session,self.__base)
+            update_pks(self.__session, self.__base)
             self.__session.flush()
             self.__session.commit()
+
         except Exception:
+            print (sys.exc_info()[0])
             self.__session.rollback()
 
     def list_series_items(self):

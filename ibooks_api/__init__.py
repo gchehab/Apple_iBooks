@@ -5,11 +5,14 @@ import os
 import zipfile
 import tempfile
 
+from calibre_plugins.apple_ibooks.config import prefs
+
+
 # Ugly hack to manipulate sys path to add allow import of complex packages, needed for pslist and sqlalchemy so far
 packages_path = os.path.join(tempfile.gettempdir(), 'calibre_ibooks_plugin')
 
 # Extract packges to temp dir if it does not exist
-if not os.path.isdir(packages_path):
+if not os.path.isdir(packages_path) or prefs['debug']:
     with zipfile.ZipFile(os.path.expanduser("~/Library/Preferences/calibre/plugins/Apple_iBooks.zip"), 'r') as packages:
         packages.extractall(packages_path)
 

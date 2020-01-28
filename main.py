@@ -20,6 +20,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from calibre_plugins.apple_ibooks import InterfacePluginAppleBooks
 from calibre_plugins.apple_ibooks.config import prefs
 from calibre_plugins.apple_ibooks.ibooks_api import IbooksApi
+
 from pprint import pprint
 
 
@@ -238,6 +239,9 @@ class MainDialog(QDialog):
             for i, book_id in enumerate(list(self.selected_book_ids)):
                 self.lw_log.insertItem(0, str(datetime.now()) + ": Syncing book id " +
                                        str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)))
+                self.pb_progressBar.repaint()
+                self.lw_log.repaint()
+                QtCore.QCoreApplication.instance().processEvents()
 
                 fmts = self.db.formats(book_id)
                 if fmts is not None:

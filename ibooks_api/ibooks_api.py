@@ -15,6 +15,9 @@ from calibre_plugins.apple_ibooks.ibooks_api.ibooks_sql import BkLibraryDb, BkSe
 from pprint import pprint
 # from fsevents import Observer, Stream
 
+# from profilehooks import profile
+
+
 from calibre_plugins.apple_ibooks.config import prefs
 
 
@@ -86,22 +89,25 @@ class IbooksApi:
             print (sys.exc_info()[0])
             raise
 
-    def __del__(self):
-    #     self.observer.unschedule(self.stream)
-    #     self.observer.stop()
-    #     self.observer.join()
-
+    def commit(self):
         try:
-            self.__kill_ibooks()
-            if self.has_changed:
-                del self.__library_db
-                del self.__series_db
+            if self.has_changed > 0:
+                self.__kill_ibooks()
+                self.__library_db.commit()
+                self.__series_db.commit()
                 writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
-
         except Exception:
             print (sys.exc_info()[0])
             raise
 
+
+    def __del__(self):
+    #     self.observer.unschedule(self.stream)
+    #     self.observer.stop()
+    #     self.observer.join()
+        self.commit()
+
+    #@profile
     def add_book(self, book_id=None, title=None, collection=None, genre=None, is_explicit=None,
                  series_name=None, series_number=0, sequence_display_name=None,
                  input_path=None, author=None):
@@ -112,30 +118,43 @@ class IbooksApi:
 
             # Check if file already exists on destination
             if input_path is not None:
+                if prefs['debug']:
+                    print ("Adding " + title + " to calibre")
+
                 if path.isfile(path.expanduser(input_path)):
                     asset_id = str(hashlib.md5(
                         self.__file_as_bytes(open(path.expanduser(input_path), 'rb'))).
                                    hexdigest()).upper()
                     book_hash = asset_id
 
+
                     if ".epub" in input_path.lower():
                         output_path = path.join(self.IBOOKS_BKAGENT_PATH, asset_id)
                         output_path = output_path + '.epub'
                         try:
+                            if prefs['debug']:
+                                print ("Extracting epub file")
+
                             with zipfile.ZipFile(path.expanduser(input_path), 'r') as epub_file:
                                 zip_info = epub_file.infolist()
                                 for member in zip_info:
                                     size += member.file_size
-                                    epub_file.extractall(path.expanduser(output_path))
+
+                                epub_file.extractall(path.expanduser(output_path))
                         except Exception:
                             if prefs['debug']:
                                 print ("Cannot extract file to destination")
                             print (sys.exc_info()[0])
                             raise
                     else:
-                        output_path = path.join(self.IBOOKS_BKAGENT_PATH, path.basename(path.expanduser(input_path)))
+                        output_path = path.join(self.IBOOKS_BKAGENT_PATH,
+                                                # path.splitext(path.basename(path.expanduser(input_path)))[0],
+                                                path.basename(path.expanduser(input_path)))
+
                         size = path.getsize(path.expanduser(input_path))
                         try:
+                            if prefs['debug']:
+                               print ("Copying pdf file")
                             copy2(path.expanduser(input_path), path.expanduser(output_path))
                         except Exception:
                             if prefs['debug']:
@@ -156,9 +175,14 @@ class IbooksApi:
                         sequence_display_name = str(series_number/100) \
                             if sequence_display_name is None else sequence_display_name
 
+                        if prefs['debug']:
+                            print ("Adding to series DB")
+
                         self.__series_db.add_book_to_series(series_name=series_name, series_id=series_adam_id,
                                                             series_number=series_number, author=author,
                                                             genre=genre, adam_id=asset_id, title=title)
+                    if prefs['debug']:
+                        print ("Adding to asset DB")
 
                     self.__library_db.add_book(book_id=book_id, title=title, collection_name=collection,
                                                filepath=output_path, asset_id=asset_id, series_name=series_name,
@@ -166,7 +190,13 @@ class IbooksApi:
                                                author=author, size=size)
 
                     # Add asset to plist file
+                    if prefs['debug']:
+                        print ("Checking if exists on Books.plist")
+
                     if asset_id not in [book['BKGeneratedItemId'] for book in self.catalog['Books']]:
+                        if prefs['debug']:
+                            print ("Adding new entry to Books.plist")
+
                         new_plist = {
                             'BKGeneratedItemId': asset_id,
                             'BKAllocatedSize': size,
@@ -178,7 +208,10 @@ class IbooksApi:
                             # 'BKPercentComplete': 1.0,
                             'comment': 'Calibre #' + str(book_id),
                             'artistName': author,
-                            # 'book-info': {'package-file-hash': book_hash},
+                            # 'book-info': {'package-file-hash': book_hash,
+                            #               'cover-image-path': u'file:/tmp/cover.jpg'},
+                            # 'cover-writing-mqode': 'horizontal',
+                            # 'cover-url': 'file:/tmp/cover.jpg',
                             # 'explicit': False if is_explicit is None else bool(is_explicit),
                             # 'genre': genre,
                             # 'isPreview': False,
@@ -198,6 +231,9 @@ class IbooksApi:
                         self.catalog['Books'].append(new_plist)
 
                     else:
+                        if prefs['debug']:
+                            print ("Modifying entry to Books.plist")
+
                         new_plist = self.catalog['Books'][
                             next((i for i, book in enumerate(self.catalog['Books'])
                                   if book['BKGeneratedItemId'] == asset_id), -1)
@@ -224,8 +260,11 @@ class IbooksApi:
                             new_plist['playlistName'] = series_name
                             new_plist['itemId'] = asset_id
 
-                    self.has_changed = 1
-                    #writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+                    self.has_changed += 1
+
+                    # Todo: add batch size as a configuration option
+                    if (self.has_changed % 250 == 0):
+                        self.commit()
 
                 else:
                     if prefs['debug']:
@@ -237,6 +276,11 @@ class IbooksApi:
                 if prefs['debug']:
                     print ("Path is invalid")
                 return -1
+
+            if prefs['debug']:
+                print ("Done adding new book\n")
+
+            return 0
 
         except Exception:
             print (sys.exc_info()[0])

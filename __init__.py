@@ -6,7 +6,7 @@ __license__   = 'GPL v3'
 __copyright__ = '2019, Guilherme Chehab <guilherme.chehab@yahoo.com>'
 __docformat__ = 'restructuredtext en'
 
-# The class that all Interface Action plugin wrappers must inherit from
+# The class that all Interface Action pluginmoiseshenrique.silva@presidencia.gov.br wrappers must inherit from
 from calibre.customize import InterfaceActionBase
 
 class InterfacePluginAppleBooks(InterfaceActionBase):
