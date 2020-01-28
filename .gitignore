@@ -1,12 +1,13 @@
 .git/
 .idea/
 .vs/
+packages/profilehooks*
 backports
 bkp
 calibre
 calibre_lzma
 css_selectors
-env
+env/
 odf
 polyglot
 pyj
