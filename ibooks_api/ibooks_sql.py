@@ -125,6 +125,9 @@ class BkLibraryDb:
 
     def __del__(self):
         self.commit()
+        del self.__session
+        del self.__base
+        del self.__engine
 
     def rollback(self):
         try:
@@ -524,6 +527,9 @@ class BkSeriesDb:
 
     def __del__(self):
         self.commit()
+        del self.__session
+        del self.__base
+        del self.__engine
 
     def rollback(self):
         try:
