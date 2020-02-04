@@ -4,6 +4,7 @@ PATH=/Applications/calibre.app/Contents/console.app/Contents/MacOS/:/Application
 while [ `ps -ef | grep calibre-debug | grep -v grep | wc -l ` != "0" ]; do
 	calibre-debug -s
 	sleep 1
+	kill -9 `ps -ef  | grep calibre | grep -v grep| tr -s ' '| cut -f 3 -d ' '`
 done
 
 find . -type l -delete
@@ -23,6 +24,7 @@ while [ 1 ] ; do
 	while [ `ps -ef | grep calibre-debug | grep -v grep | wc -l ` != "0" ]; do
 		calibre-debug -s 
 		sleep 1
+		kill -9 `ps -ef  | grep calibre | grep -v grep| tr -s ' '| cut -f 3 -d ' '`
 	done
 	find . -type l -delete
 	calibre-customize -b `pwd`

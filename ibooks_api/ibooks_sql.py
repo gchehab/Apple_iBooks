@@ -64,16 +64,17 @@ def update_pks(session, base):
         session.flush()
         pks = session.query(base.classes.Z_PRIMARYKEY).all()
         if prefs['debug']:
-            print ("Update pks for " + str(len(pks)) + " tables")
+            print (str(datetime.now()) + ": Update pks for " + str(len(pks)) + " tables")
         for pk in pks:
             z_name = pk.Z_NAME
             class_name = "Z" + str(z_name).upper()
             max_pk = session.query(func.max(base.classes[class_name].Z_PK)).limit(1).all()[0][0]
             pk.Z_MAX = max_pk if max_pk is not None else 0
             if prefs['debug']:
-                print ("Pk for " + z_name + " is " + str(max_pk))
+                print ("\tPk for " + z_name + " is " + str(max_pk))
             session.add(pk)
         session.flush()
+
     except Exception:
         print (sys.exc_info()[0])
         session.rollback()
@@ -116,6 +117,7 @@ class BkLibraryDb:
             #     print (relations)
 
             self.__session = Session(self.__engine)
+            self.has_changed = 0
         except Exception:
             print (sys.exc_info()[0])
             raise
@@ -124,16 +126,29 @@ class BkLibraryDb:
     def __del__(self):
         self.commit()
 
-    def commit(self):
+    def rollback(self):
         try:
+            self.__session.rollback()
             update_pks(self.__session, self.__base)
-            self.__session.flush()
-            self.__session.commit()
+            self.has_changed = 0
 
         except Exception:
             print (sys.exc_info()[0])
-
             self.__session.rollback()
+            self.has_changed = 0
+
+    def commit(self):
+        try:
+            if self.has_changed:
+                update_pks(self.__session, self.__base)
+                self.__session.flush()
+                self.__session.commit()
+                self.has_changed=0
+
+        except Exception:
+            print (sys.exc_info()[0])
+            self.__session.rollback()
+            self.has_changed=0
 
     def list_books(self):
         """List all books in iBooks"""
@@ -198,7 +213,7 @@ class BkLibraryDb:
 
             if len(result):
                 if prefs['debug']:
-                    print ('Book already exists, updating database')
+                    print (str(datetime.now()) + ": Book already exists, updating database")
                 new_book = result[0]
                 new_book.ZAUTHOR = author
                 new_book.ZSERIESID = series_id
@@ -210,7 +225,7 @@ class BkLibraryDb:
 
             else:
                 if prefs['debug']:
-                    print ('Book is new, adding to database')
+                    print (str(datetime.now()) + ": Book is new, adding to database")
                 new_book = self.__base.classes.ZBKLIBRARYASSET(
                     Z_OPT=1,
                     Z_ENT=5,
@@ -269,17 +284,15 @@ class BkLibraryDb:
 
                 self.__session.add(new_book)
                 self.__session.flush()
+                self.has_changed=1
 
                 # pk_bklibraryasset.Z_MAX = new_book.Z_PK
                 # self.__session.add(pk_bklibraryasset)
                 # self.__session.flush()
 
-            if prefs['debug']:
-                print (new_book.Z_PK)
-
             for collection in collections:
                 if prefs['debug']:
-                    print ("Adding book to collection: " + collection.ZTITLE)
+                    print (str(datetime.now()) + ": Adding book to collection: " + collection.ZTITLE)
                 collection_membership = self.__session.query(self.__base.classes.ZBKCOLLECTIONMEMBER).filter_by(
                     ZASSETID=asset_id,
                     ZCOLLECTION=collection.Z_PK
@@ -297,6 +310,7 @@ class BkLibraryDb:
 
                     self.__session.add(new_collection_member)
                     self.__session.flush()
+                    self.has_changed=1
                     #
                     # pk_bkcollectionmember.Z_MAX = new_collection_member.Z_PK
                     # self.__session.add(pk_bkcollectionmember)
@@ -337,6 +351,7 @@ class BkLibraryDb:
                     )
 
                     self.__session.delete(book)
+                    self.has_changed = 1
 
                     # Delete empty collections
                     for collection in collections:
@@ -346,7 +361,7 @@ class BkLibraryDb:
 
                         if book_count == 0:
                             if prefs['debug']:
-                                print ("Delete Empty collection " + collection.ZTITLE)
+                                print (str(datetime.now()) + ": Delete Empty collection " + collection.ZTITLE)
                             self.__session.delete(collection)
 
             # Delete empty collections
@@ -363,15 +378,16 @@ class BkLibraryDb:
 
                     if book_count==0:
                         if prefs['debug']:
-                            print ("Delete Empty collection " + collection.ZTITLE)
+                            print (str(datetime.now()) + ": Delete Empty collection " + collection.ZTITLE)
                         self.__session.delete(collection)
+                        self.has_changed = 1
 
             # Todo: reset primary keys to max of remaining itens
 
-            # self.__session.commit()
+            self.__session.flush()
             if prefs['debug']:
-                print "Books in library assets table: " + str(count)
-                print "Books in collection member table: " + str(len(asset_ids))
+                print str(datetime.now()) + ": Books in library assets table: " + str(count)
+                print str(datetime.now()) + ": Books in collection member table: " + str(len(asset_ids))
             return len(asset_ids)
 
         except Exception:
@@ -423,6 +439,7 @@ class BkLibraryDb:
                 pk_bkcollection.Z_MAX = new.Z_PK
                 self.__session.add(pk_bkcollection)
                 self.__session.flush()
+                self.has_changed=1
 
                 return new
 
@@ -450,6 +467,7 @@ class BkLibraryDb:
                     result[0].ZDELETEDFLAG = 1
                     self.__session.add(result[0])
                     self.__session.flush()
+                    self.has_changed=1
                     return 0
                 else:
                     raise ("No collection named " + title + " to delete")
@@ -499,6 +517,7 @@ class BkSeriesDb:
             #     print (relations)
 
             self.__session = Session(self.__engine)
+            self.has_changed = 0
         except Exception:
             print (sys.exc_info()[0])
             raise
@@ -506,14 +525,28 @@ class BkSeriesDb:
     def __del__(self):
         self.commit()
 
-    def commit(self):
+    def rollback(self):
         try:
+            self.__session.rollback()
             update_pks(self.__session, self.__base)
-            self.__session.flush()
-            self.__session.commit()
+            self.has_changed = 0
 
         except Exception:
             print (sys.exc_info()[0])
+            self.__session.rollback()
+            self.has_changed = 0
+
+    def commit(self):
+        try:
+            if self.has_changed:
+                update_pks(self.__session, self.__base)
+                self.__session.flush()
+                self.__session.commit()
+                self.has_changed=0
+
+        except Exception:
+            print (sys.exc_info()[0])
+            self.has_changed=0
             self.__session.rollback()
 
     def list_series_items(self):
@@ -591,6 +624,7 @@ class BkSeriesDb:
                 self.__session.add(new_series_checked)
                 self.__session.add(new_series_item)
                 self.__session.flush()
+                self.has_changed = 1
 
                 # Update indices
                 # pk_bkseriescheck = self.__session.query(self.__base.classes.Z_PRIMARYKEY).filter(
@@ -607,7 +641,7 @@ class BkSeriesDb:
                 # pk_bkseriesitem.Z_MAX = new_series_item.Z_PK
                 # self.__session.add(pk_bkseriesitem)
 
-                self.__session.flush()
+                # self.__session.flush()
 
                 is_container = 0
                 parent_id = series_id
@@ -639,8 +673,9 @@ class BkSeriesDb:
                 )
                 for book in books:
                     if prefs['debug']:
-                        print(book.ZADAMID)
+                        print(str(datetime.now()) + ": Deleting book " + book.ZADAMID + " from series DB")
                     self.__session.delete(book)
+                    self.has_changed=1
 
                 # Delete empty series
                 for series_id in series_ids:

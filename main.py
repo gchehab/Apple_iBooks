@@ -13,6 +13,9 @@ if False:
     get_icons = get_resources = None
 
 import re
+import sys
+from math import ceil
+from traceback import print_exc
 from datetime import datetime
 from PyQt5.Qt import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QMessageBox, QLabel, QApplication, QEventLoop
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -31,6 +34,11 @@ class MainDialog(QDialog):
         prefs['debug'] = True
         prefs['remove_last_synced'] = False
 
+        # Instance variables
+        self.is_syncing = 0
+        self.has_synced = 0
+
+        # Dialog
         QDialog.__init__(self, gui)
         self.qDialog = QDialog
         self.gui = gui
@@ -38,6 +46,7 @@ class MainDialog(QDialog):
         self.do_user_config = do_user_config
         self.is_sync_selected = is_sync_selected
         self.selected_book_ids = selected_book_ids if is_sync_selected else self.db.all_book_ids()
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
 
         # The current database shown in the GUI
         # db is an instance of the class LibraryDatabase from db/legacy.py
@@ -115,6 +124,7 @@ class MainDialog(QDialog):
         self.pb_progressBar.setGeometry(QtCore.QRect(10, 40, 541, 23))
         self.pb_progressBar.setProperty("value", 0)
         self.pb_progressBar.setObjectName("pb_progressBar")
+        self.pb_progressBar.setFormat("%v/%m")
         self.l.addWidget(self.gb_progress)
 
         self.gb_log = QtWidgets.QGroupBox(self)
@@ -170,6 +180,9 @@ class MainDialog(QDialog):
         self.retranslateUi(QDialog)
         # QtCore.QMetaObject.connectSlotsByName(QDialog)
 
+    def __del__(self):
+        self.is_syncing = 0
+
     def retranslateUi(self, QDialog):
         _translate = QtCore.QCoreApplication.translate
         # QDialog.setWindowTitle(_translate("QDialog", "Dialog"))
@@ -196,6 +209,7 @@ class MainDialog(QDialog):
         else:
             self.ck_syncSelected.setText(_translate("qWidget", "Sync selected books only (all collection = " +
                                                     str(len(self.selected_book_ids)) + " books)"))
+        self.pb_progressBar.setMaximum(len(self.selected_book_ids))
 
     def about(self):
         # Get the about text from a file inside the plugin zip file
@@ -221,82 +235,142 @@ class MainDialog(QDialog):
         # prefs['remove_last_synced'] = self.ck_cleanlast.isChecked()
 
     def sync(self):
-        if (self.pb_progressBar.value() == 100):
-            self.buttonBox.setEnabled(True)
-            self.close()
-        else:
-            self.buttonBox.setEnabled(False)
-            self.pb_progressBar.setProperty("value", 1)
-            self.lw_log.insertItem(0, str(datetime.now()) + ": Starting Sync")
-            self.lw_log.insertItem(0, str(datetime.now()) + ": Finishing iBooks and its agent processes")
-            ibooks = IbooksApi()
+        try:
+            if self.has_synced or self.is_syncing:
+                self.buttonBox.setEnabled(True)
+                self.close()
+            else:
+                self.buttonBox.setEnabled(False)
+                self.pb_progressBar.setProperty("value", 0)
+                self.lw_log.addItem(str(datetime.now()) + ": Starting Sync")
+                self.lw_log.addItem(str(datetime.now()) + ": Finishing iBooks and its agent processes")
+                books = IbooksApi()
+                total = len(self.selected_book_ids)
+                self.pb_progressBar.setMinimum(0)
+                self.pb_progressBar.setMaximum(total)
 
-            if prefs['remove_last_synced']:
-                self.lw_log.insertItem(0, str(datetime.now()) + ": Removing calibre books from iBooks")
-                count=ibooks.del_all_books_from_calibre()
-                self.lw_log.insertItem(0, str(datetime.now()) + ": Removed " + str (count) + " calibre books from iBooks")
+                if prefs['remove_last_synced']:
+                    self.lw_log.addItem(str(datetime.now()) + ": Removing calibre books from iBooks")
+                    count = books.del_all_books_from_calibre()
+                    self.lw_log.addItem(str(datetime.now()) + ": Removed " + str (count) + " calibre books from iBooks")
 
-            for i, book_id in enumerate(list(self.selected_book_ids)):
-                self.lw_log.insertItem(0, str(datetime.now()) + ": Syncing book id " +
-                                       str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)))
-                self.pb_progressBar.repaint()
-                self.lw_log.repaint()
-                QtCore.QCoreApplication.instance().processEvents()
+                self.is_syncing = 1
 
-                fmts = self.db.formats(book_id)
-                if fmts is not None:
-                    if 'EPUB' in fmts or 'PDF' in fmts:
-                        mi = self.db.get_metadata(book_id, get_cover=False, cover_as_data=False)
-                        fmt = 'EPUB' if 'EPUB' in fmts else 'PDF'
-                        file_path = self.db.format_abspath(book_id, fmt)
+                for i, book_id in enumerate(list(self.selected_book_ids)):
+                    if self.is_syncing == 0 or not self.isVisible():
+                        self.lw_log.addItem(str(datetime.now()) + ": Must interrupt")
+                        self.pb_progressBar.repaint()
+                        self.lw_log.repaint()
+                        QtCore.QCoreApplication.instance().processEvents()
+                        books.commit()
+                        self.is_syncing = 0
+                        break
 
-                        ibooks.add_book(
-                            book_id=book_id,
-                            title=mi.title,
-                            author=', '.join(map(str,mi.authors)),
-                            input_path=file_path,
-                            collection=mi.series if mi.series is not None else
-                                (u"Books" if fmt == "EPUB" else u"PDFs"),
-                            # genre=mi.genre,
-                            series_name=mi.series,
-                            series_number=mi.series_index
-                        )
+                    mi = self.db.get_metadata(book_id, get_cover=False, cover_as_data=False)
+                    fmts = self.db.formats(book_id)
 
-                        self.lw_log.insertItem(0, str(datetime.now()) + ": Done syncing book id " +
-                                               str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)) +
-                                               " - " + mi.title)
+                    # self.lw_log.addItem(str(datetime.now()) + ": Syncing book id " +
+                    #                        str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)) +
+                    #                        " - " + mi.title)
+
+                    # Update for each 1% completed
+                    if i % ceil(total / 1000) == 0:
+                        self.pb_progressBar.repaint()
+                        self.lw_log.repaint()
+                        QtCore.QCoreApplication.instance().processEvents()
+
+                    if fmts is not None:
+                        if 'EPUB' in fmts or 'PDF' in fmts:
+                            mi = self.db.get_metadata(book_id, get_cover=False, cover_as_data=False)
+                            fmt = 'EPUB' if 'EPUB' in fmts else 'PDF'
+                            file_path = self.db.format_abspath(book_id, fmt)
+
+                            if prefs['debug']:
+                                print(str(datetime.now()) + ": Calling Ibooks Api to add book with id# "
+                                      + str(book_id) + " to calibre")
+
+                            books.add_book(
+                                book_id=book_id,
+                                title=mi.title,
+                                author=', '.join(map(str,mi.authors)),
+                                input_path=file_path,
+                                collection=mi.series if mi.series is not None else
+                                    (u"Books" if fmt == "EPUB" else u"PDFs"),
+                                # genre=mi.genre,
+                                series_name=mi.series,
+                                series_number=mi.series_index
+                            )
+
+                            # self.lw_log.addItem(str(datetime.now()) + ": Done syncing book id " +
+                            #                        str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)) +
+                            #                        " - " + mi.title)
+
+                        else:
+                            self.lw_log.addItem(str(datetime.now()) + ": Book id " +
+                                                   str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)) +
+                                                   " - " + mi.title + " - has no compatible formats, skipping")
                     else:
-                        self.lw_log.insertItem(0, str(datetime.now()) + ": Book id " +
+                        self.lw_log.addItem(str(datetime.now()) + ": Book id " +
                                                str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)) +
                                                " - " + mi.title + " - has no compatible formats, skipping")
-                else:
-                    self.lw_log.insertItem(0, str(datetime.now()) + ": Book id " +
-                                           str(book_id) + ": " + str(i + 1) + "/" + str(len(self.selected_book_ids)) +
-                                           " - " + mi.title + " - has no compatible formats, skipping")
 
-                self.pb_progressBar.setProperty("value", 1 + 99 * (i + 1) / len(self.selected_book_ids))
+                    self.pb_progressBar.setProperty("value", i+1)
+                    # self.pb_progressBar.repaint()
+                    # self.lw_log.repaint()
+                    # QtCore.QCoreApplication.instance().processEvents()
+
+                # End sync
+                self.has_synced = 1
+                self.lw_log.addItem(str(datetime.now()) + ": Finished Sync")
+                self.buttonBox.setEnabled(True)
+
                 self.pb_progressBar.repaint()
                 self.lw_log.repaint()
                 QtCore.QCoreApplication.instance().processEvents()
 
-            # End sync
-            del ibooks
+                books.commit()
+                del books
+                self.is_syncing = 0
 
-            self.pb_progressBar.setProperty("value", 100)
-            self.lw_log.insertItem(0, str(datetime.now()) + ": Finished Sync")
-            self.buttonBox.setEnabled(True)
+        except Exception:
+            self.has_synced = 1
+            books.rollback()
+            self.is_syncing = 0
+            print_exc()
+            pass
 
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key_Escape:
-            if 0 < self.pb_progressBar.value() < 100:
+            self.buttonBox.setEnabled(True)
+            if self.is_syncing:
                 if prefs['debug']:
-                    print("Sync in progress, cannot close")
-            else:
-                event.accept()
+                    print("Sync in progress, force closing")
+                self.lw_log.addItem(str(datetime.now()) + ": Interrupt Sync")
+
+                # # Interrupt syncing
+                # try:
+                #     self.books
+                #     del self.books
+                # except (NameError, TypeError):
+                #     print_exc()
+                #     pass
+
+            self.is_syncing = 0
+            event.accept()
+
 
     def closeEvent(self, event):
-        if 0 < self.pb_progressBar.value() < 100:
+        self.buttonBox.setEnabled(True)
+        if self.is_syncing:
             if prefs['debug']:
-                print ("Sync in progress, cannot close")
-        else:
-            event.accept()
+                print ("Sync in progress, force closing")
+            self.lw_log.addItem(str(datetime.now()) + ": Interrupt Sync")
+
+            # try:
+            #     del self.books
+            # except (NameError, TypeError):
+            #     print_ext()
+            #     pass
+
+        self.is_syncing = 0
+        event.accept()

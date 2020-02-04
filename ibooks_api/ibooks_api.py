@@ -8,6 +8,7 @@ import zipfile
 import zlib
 import re
 from time import time
+from datetime import datetime
 
 import psutil
 from biplist import readPlist, writePlist, InvalidPlistException, NotBinaryPlistException
@@ -89,6 +90,18 @@ class IbooksApi:
             print (sys.exc_info()[0])
             raise
 
+    def rollback(self):
+        try:
+            if self.has_changed > 0:
+                self.__kill_ibooks()
+                self.__library_db.rollback()
+                self.__series_db.rollback()
+                # writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+                self.has_changed = 0
+        except Exception:
+            print (sys.exc_info()[0])
+            raise
+
     def commit(self):
         try:
             if self.has_changed > 0:
@@ -96,6 +109,7 @@ class IbooksApi:
                 self.__library_db.commit()
                 self.__series_db.commit()
                 writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+                self.has_changed = 0
         except Exception:
             print (sys.exc_info()[0])
             raise
@@ -119,7 +133,7 @@ class IbooksApi:
             # Check if file already exists on destination
             if input_path is not None:
                 if prefs['debug']:
-                    print ("Adding " + title + " to calibre")
+                    print (str(datetime.now()) + ": Adding " + title + " to calibre")
 
                 if path.isfile(path.expanduser(input_path)):
                     asset_id = str(hashlib.md5(
@@ -127,40 +141,45 @@ class IbooksApi:
                                    hexdigest()).upper()
                     book_hash = asset_id
 
-
                     if ".epub" in input_path.lower():
                         output_path = path.join(self.IBOOKS_BKAGENT_PATH, asset_id)
                         output_path = output_path + '.epub'
-                        try:
-                            if prefs['debug']:
-                                print ("Extracting epub file")
-
-                            with zipfile.ZipFile(path.expanduser(input_path), 'r') as epub_file:
-                                zip_info = epub_file.infolist()
-                                for member in zip_info:
-                                    size += member.file_size
-
-                                epub_file.extractall(path.expanduser(output_path))
-                        except Exception:
-                            if prefs['debug']:
-                                print ("Cannot extract file to destination")
-                            print (sys.exc_info()[0])
-                            raise
                     else:
                         output_path = path.join(self.IBOOKS_BKAGENT_PATH,
                                                 # path.splitext(path.basename(path.expanduser(input_path)))[0],
                                                 path.basename(path.expanduser(input_path)))
 
-                        size = path.getsize(path.expanduser(input_path))
-                        try:
-                            if prefs['debug']:
-                               print ("Copying pdf file")
-                            copy2(path.expanduser(input_path), path.expanduser(output_path))
-                        except Exception:
-                            if prefs['debug']:
-                                print ("Cannot copy file to destination")
-                            print (sys.exc_info()[0])
-                            raise
+                    if not path.exists(output_path):
+                        if ".epub" in input_path.lower():
+                            try:
+                                if prefs['debug']:
+                                    print (str(datetime.now()) + ": Extracting epub file")
+
+                                with zipfile.ZipFile(path.expanduser(input_path), 'r') as epub_file:
+                                    zip_info = epub_file.infolist()
+                                    for member in zip_info:
+                                        size += member.file_size
+
+                                    epub_file.extractall(path.expanduser(output_path))
+                            except Exception:
+                                if prefs['debug']:
+                                    print (str(datetime.now()) + ": Cannot extract file to destination")
+                                print (sys.exc_info()[0])
+                                raise
+                        else:
+                            size = path.getsize(path.expanduser(input_path))
+                            try:
+                                if prefs['debug']:
+                                   print (str(datetime.now()) + ": Copying pdf file")
+                                copy2(path.expanduser(input_path), path.expanduser(output_path))
+                            except Exception:
+                                if prefs['debug']:
+                                    print (str(datetime.now()) + ": Cannot copy file to destination")
+                                print (sys.exc_info()[0])
+                                raise
+                    else:
+                        if prefs['debug']:
+                            print (str(datetime.now()) + ": Will not copy/extract file as it already exists -- update metadata only")
 
                     # Add book to database
                     series_adam_id = None
@@ -176,13 +195,13 @@ class IbooksApi:
                             if sequence_display_name is None else sequence_display_name
 
                         if prefs['debug']:
-                            print ("Adding to series DB")
+                            print (str(datetime.now()) + ": Adding to series DB")
 
                         self.__series_db.add_book_to_series(series_name=series_name, series_id=series_adam_id,
                                                             series_number=series_number, author=author,
                                                             genre=genre, adam_id=asset_id, title=title)
                     if prefs['debug']:
-                        print ("Adding to asset DB")
+                        print (str(datetime.now()) + ": Adding to asset DB")
 
                     self.__library_db.add_book(book_id=book_id, title=title, collection_name=collection,
                                                filepath=output_path, asset_id=asset_id, series_name=series_name,
@@ -191,11 +210,11 @@ class IbooksApi:
 
                     # Add asset to plist file
                     if prefs['debug']:
-                        print ("Checking if exists on Books.plist")
+                        print (str(datetime.now()) + ": Checking if exists on Books.plist")
 
                     if asset_id not in [book['BKGeneratedItemId'] for book in self.catalog['Books']]:
                         if prefs['debug']:
-                            print ("Adding new entry to Books.plist")
+                            print (str(datetime.now()) + ": Adding new entry to Books.plist")
 
                         new_plist = {
                             'BKGeneratedItemId': asset_id,
@@ -232,7 +251,7 @@ class IbooksApi:
 
                     else:
                         if prefs['debug']:
-                            print ("Modifying entry to Books.plist")
+                            print (str(datetime.now()) + ": Modifying entry to Books.plist")
 
                         new_plist = self.catalog['Books'][
                             next((i for i, book in enumerate(self.catalog['Books'])
@@ -262,23 +281,24 @@ class IbooksApi:
 
                     self.has_changed += 1
 
-                    # Todo: add batch size as a configuration option
-                    if (self.has_changed % 250 == 0):
-                        self.commit()
 
                 else:
                     if prefs['debug']:
-                        print ("File not found!")
+                        print (str(datetime.now()) + ": File not found!")
                     print (sys.exc_info()[0])
                     return -1
 
             else:
                 if prefs['debug']:
-                    print ("Path is invalid")
+                    print (str(datetime.now()) + ": Path is invalid")
                 return -1
 
             if prefs['debug']:
-                print ("Done adding new book\n")
+                print (str(datetime.now()) + ": Done adding new book\n")
+
+            # Todo: add batch size as a configuration option
+            if (self.has_changed % 1000 == 0):
+                self.commit()
 
             return 0
 
@@ -292,16 +312,19 @@ class IbooksApi:
 
         count = len(self.catalog['Books'])
 
+        if prefs['debug']:
+                    print str(datetime.now()) + ": Deletting all books from calibre"
+
         for i in range(len(self.catalog['Books']) - 1, -1, -1):
             book = self.catalog['Books'][i]
 
             if 'comment' not in book:
                 if prefs['debug']:
-                    print str(i) + 'Book not added by calibre, skipping'
+                    print str(datetime.now()) + ": Not deleting " + str(i) + ': Book not added by calibre, skipping'
                 continue
 
             if prefs['debug']:
-                print str(i) + ": " + book['comment']
+                print str(datetime.now()) + ": Deleting " + str(i) + ": " + book['comment']
 
             if "Calibre #" in book['comment']:
                 file_path = book['path']
@@ -319,7 +342,7 @@ class IbooksApi:
                 if 'seriesAdamId' in book:
                     adam_id = book['itemId']
                     if prefs['debug']:
-                        print "Removed " +str(adam_id) + " from series table"
+                        print str(datetime.now()) + ": Removed " +str(adam_id) + " from series table"
                     self.__series_db.del_book_from_series(adam_id=adam_id)
 
                 del (self.catalog['Books'][i])
@@ -327,7 +350,7 @@ class IbooksApi:
                 deleted += 1
 
         if prefs['debug']:
-            print "Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
+            print str(datetime.now()) + ": Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
               str(len(self.catalog['Books'])) + " books"
         # if deleted > 0:
         #     writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
