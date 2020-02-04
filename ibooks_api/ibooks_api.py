@@ -120,6 +120,9 @@ class IbooksApi:
     #     self.observer.stop()
     #     self.observer.join()
         self.commit()
+        del self.__series_db
+        del self.__library_db
+        del self.catalog
 
     #@profile
     def add_book(self, book_id=None, title=None, collection=None, genre=None, is_explicit=None,
