@@ -12,8 +12,6 @@ if False:
     # You do not need this code in your plugins
     get_icons = get_resources = None
 
-import re
-import sys
 from math import ceil
 from traceback import print_exc
 from datetime import datetime
@@ -30,7 +28,7 @@ from pprint import pprint
 class MainDialog(QDialog):
     def __init__(self, gui, icon, do_user_config, selected_book_ids, is_sync_selected):
         # Hard code some preferences for now
-        prefs['backup'] = False
+        prefs['backup'] = True
         prefs['debug'] = True
         prefs['remove_last_synced'] = False
 
@@ -181,6 +179,16 @@ class MainDialog(QDialog):
         # QtCore.QMetaObject.connectSlotsByName(QDialog)
 
     def __del__(self):
+        if self.is_syncing:
+            if prefs['debug']:
+                print ("Sync in progress, force closing")
+            self.lw_log.addItem(str(datetime.now()) + ": Interrupt Sync")
+            try:
+                books.rollback()
+                del books
+            except (NameError, TypeError):
+                #print_ext()
+                pass
         self.is_syncing = 0
 
     def retranslateUi(self, QDialog):
@@ -245,6 +253,7 @@ class MainDialog(QDialog):
                 self.lw_log.addItem(str(datetime.now()) + ": Starting Sync")
                 self.lw_log.addItem(str(datetime.now()) + ": Finishing iBooks and its agent processes")
                 books = IbooksApi()
+                self.is_syncing = 1
                 total = len(self.selected_book_ids)
                 self.pb_progressBar.setMinimum(0)
                 self.pb_progressBar.setMaximum(total)
@@ -253,8 +262,6 @@ class MainDialog(QDialog):
                     self.lw_log.addItem(str(datetime.now()) + ": Removing calibre books from iBooks")
                     count = books.del_all_books_from_calibre()
                     self.lw_log.addItem(str(datetime.now()) + ": Removed " + str (count) + " calibre books from iBooks")
-
-                self.is_syncing = 1
 
                 for i, book_id in enumerate(list(self.selected_book_ids)):
                     if self.is_syncing == 0 or not self.isVisible():
@@ -334,7 +341,8 @@ class MainDialog(QDialog):
 
         except Exception:
             self.has_synced = 1
-            books.rollback()
+            if self.is_syncing:
+                books.rollback()
             self.is_syncing = 0
             print_exc()
             pass
@@ -346,7 +354,12 @@ class MainDialog(QDialog):
                 if prefs['debug']:
                     print("Sync in progress, force closing")
                 self.lw_log.addItem(str(datetime.now()) + ": Interrupt Sync")
-
+                try:
+                    books.rollback()
+                    del books
+                except (NameError, TypeError):
+                    #print_ext()
+                    pass
                 # # Interrupt syncing
                 # try:
                 #     self.books
@@ -366,11 +379,12 @@ class MainDialog(QDialog):
                 print ("Sync in progress, force closing")
             self.lw_log.addItem(str(datetime.now()) + ": Interrupt Sync")
 
-            # try:
-            #     del self.books
-            # except (NameError, TypeError):
-            #     print_ext()
-            #     pass
+            try:
+                books.rollback()
+                del books
+            except (NameError, TypeError):
+                #print_ext()
+                pass
 
-        self.is_syncing = 0
+            self.is_syncing = 0
         event.accept()

@@ -1,6 +1,7 @@
 #!/usr/bin/python
 # -*- coding=utf-8 -*-
-from os import path
+from os import path, remove
+from shutil import copy2
 
 import sys
 import zlib
@@ -118,13 +119,14 @@ class BkLibraryDb:
 
             self.__session = Session(self.__engine)
             self.has_changed = 0
+            self.has_backup = False
         except Exception:
             print (sys.exc_info()[0])
             raise
 
 
     def __del__(self):
-        self.commit()
+        # self.commit()
         del self.__session
         del self.__base
         del self.__engine
@@ -134,7 +136,13 @@ class BkLibraryDb:
             self.__session.rollback()
             update_pks(self.__session, self.__base)
             self.has_changed = 0
-
+            if prefs['backup'] and self.has_backup:
+                for file in ['dbbookcatalog']:
+                    if prefs['debug']:
+                        print (str(datetime.now()) + ": Rolling back " + filename)
+                    copy2(prefs[file] + ".bkp", prefs[file])
+                    remove(prefs[file] + ".bkp")
+                self.has_backup = False
         except Exception:
             print (sys.exc_info()[0])
             self.__session.rollback()
@@ -143,10 +151,16 @@ class BkLibraryDb:
     def commit(self):
         try:
             if self.has_changed:
+                if prefs['backup'] and not self.has_backup:
+                    for filename in ['dbbookcatalog']:
+                        if prefs['debug']:
+                            print (str(datetime.now()) + ": Backing up " + filename)
+                        copy2(prefs[filename], prefs[filename] + ".bkp")
+                    self.has_backup = True
                 update_pks(self.__session, self.__base)
                 self.__session.flush()
                 self.__session.commit()
-                self.has_changed=0
+                self.has_changed = 0
 
         except Exception:
             print (sys.exc_info()[0])
@@ -521,12 +535,13 @@ class BkSeriesDb:
 
             self.__session = Session(self.__engine)
             self.has_changed = 0
+            self.has_backup = False
         except Exception:
             print (sys.exc_info()[0])
             raise
 
     def __del__(self):
-        self.commit()
+        # self.commit()
         del self.__session
         del self.__base
         del self.__engine
@@ -536,7 +551,13 @@ class BkSeriesDb:
             self.__session.rollback()
             update_pks(self.__session, self.__base)
             self.has_changed = 0
-
+            if prefs['backup'] and self.has_backup:
+                for filename in ['dbbookcatalog']:
+                    if prefs['debug']:
+                        print (str(datetime.now()) + ": Rolling back " + filename)
+                    copy2(prefs[filename] + ".bkp", prefs[filename])
+                    remove(prefs[filename] + ".bkp")
+                self.has_backup = False
         except Exception:
             print (sys.exc_info()[0])
             self.__session.rollback()
@@ -545,6 +566,12 @@ class BkSeriesDb:
     def commit(self):
         try:
             if self.has_changed:
+                if prefs['backup'] and not self.has_backup:
+                    for filename in ['dbseriescatalog']:
+                        if prefs['debug']:
+                            print (str(datetime.now()) + ": Backing up " + filename)
+                        copy2(prefs[filename], prefs[filename] + ".bkp")
+                    self.has_backup = True
                 update_pks(self.__session, self.__base)
                 self.__session.flush()
                 self.__session.commit()

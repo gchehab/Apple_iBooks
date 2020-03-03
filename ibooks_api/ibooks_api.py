@@ -3,7 +3,7 @@
 import sys
 import hashlib
 from os import path, getuid, remove
-from shutil import copy2, rmtree
+from shutil import copy2, rmtree, move
 import zipfile
 import zlib
 import re
@@ -15,48 +15,99 @@ from biplist import readPlist, writePlist, InvalidPlistException, NotBinaryPlist
 from calibre_plugins.apple_ibooks.ibooks_api.ibooks_sql import BkLibraryDb, BkSeriesDb
 from pprint import pprint
 # from fsevents import Observer, Stream
-
-# from profilehooks import profile
-
+from profilehooks import profile
 
 from calibre_plugins.apple_ibooks.config import prefs
 
+def my_profile(func):
+    def profile_it(*args, **kwargs):
+        if prefs['debug']:
+            profile(func)(*args, **kwargs)
+        else:
+            func(*args, **kwargs)
+    return profile_it
 
 class IbooksApi:
     catalog = {}
-    #IBOOKS_BKAGENT_PATH = path.expanduser("~/Library/Containers/com.apple.BKAgentService/Data/Documents/iBooks/Books")
     IBOOKS_BKAGENT_PATH = path.dirname(prefs['bookcatalog'])
-
-    #IBOOKS_BKAGENT_CATALOG = "books.plist"
-    #IBOOKS_BKAGENT_CATALOG_FILE = path.join(IBOOKS_BKAGENT_PATH, IBOOKS_BKAGENT_CATALOG)
     IBOOKS_BKAGENT_CATALOG_FILE = prefs['bookcatalog']
 
     @staticmethod
-    def __file_as_bytes(file_to_read):
+    def __file_as_bytes(file_to_read, size=None):
         with file_to_read:
-            return file_to_read.read()
+            return file_to_read.read(size) if size is not None else file_to_read.read()
 
     @staticmethod
     def __kill_ibooks():
+        ps_util_fail = False
+
         try:
-            # Kill any running ibooks process from the current user
-            for process in psutil.process_iter(attrs=['pid', 'name']):
-                if getuid() == process. uids()[1]:
-                    if 'Books' in process.info['name']:
-                        if 'Books.app' in process.cmdline()[0]:
+            processes = psutil.process_iter(attrs=['pid', 'name'])
+        except:
+            ps_util_fail = True
+            pass
+
+        try:
+            if not ps_util_fail:
+                # Kill any running ibooks process from the current user using pslist
+                for process in processes:
+                    if getuid() == process.uids()[1]:
+                        if 'Books' in process.info['name']:
+                            if 'Books.app' in process.cmdline()[0]:
+                                try:
+                                    if prefs['debug']:
+                                        print (str(datetime.now()) + ": Killing (i)Books.app")
+
+                                    process.terminate()
+                                    process.wait(5)
+                                except Exception:
+                                    process.kill()
+                                    pass
+                        if 'BKAgentService' in process.info['name']:
                             try:
+                                if prefs['debug']:
+                                    print (str(datetime.now()) + ": Killing BKAgentService")
                                 process.terminate()
                                 process.wait(5)
                             except Exception:
                                 process.kill()
                                 pass
-                    if 'BKAgentService' in process.info['name']:
+            else:
+                # Kill any running ibooks process from the current user using ps -Au and os.kill
+                from os import kill, waitpid, WNOHANG
+                from re import split
+                from errno import ESRCH
+                from subprocess import Popen, PIPE
+                from time import sleep
+                from signal import SIGTERM, SIGKILL
+                p = Popen(['ps', '-Au', str(getuid())], stdout=PIPE)
+                out, err = p.communicate()
+                for line in out.splitlines():
+                    if 'Books.app' in line or 'BKAgentService' in line:
+                        pid = int(split(r"\s+", line)[2])
+                        if prefs['debug']:
+                            print (str(datetime.now()) + ": Killing " + str(pid)) #split(r"\t+", line)[4])
+
+                        tries = 0
                         try:
-                            process.terminate()
-                            process.wait(5)
-                        except Exception:
-                            process.kill()
-                            pass
+                            while (kill(pid, SIGTERM) and tries < 3):
+                                sleep(0.5)
+                                tries += 1
+                        except OSError as err:
+                            if err.errno == ESRCH:
+                                return False
+                            return True
+
+
+                        tries = 0
+                        try:
+                            while (kill(pid, SIGKILL) and tries < 3):
+                                sleep(0.5)
+                                tries += 1
+                        except OSError as err:
+                            if err.errno == ESRCH:
+                                return False
+
         except Exception:
             raise
 
@@ -79,11 +130,12 @@ class IbooksApi:
             self.__library_db = BkLibraryDb()
             self.__series_db = BkSeriesDb()
             self.has_changed = 0
+            self.has_backup = False
             self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
 
         except (InvalidPlistException, NotBinaryPlistException), e:
             if prefs['debug']:
-                print "Not a plist:", e
+                print (str(datetime.now()) + ": " + self.IBOOKS_BKAGENT_CATALOG_FILE + "is not a valid plist file")
             raise
 
         except Exception:
@@ -94,21 +146,55 @@ class IbooksApi:
         try:
             if self.has_changed > 0:
                 self.__kill_ibooks()
+
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Rolling back library DB")
                 self.__library_db.rollback()
+
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Rolling back Series DB")
                 self.__series_db.rollback()
-                # writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+
+                if prefs['backup'] and self.has_backup:
+                    if prefs['debug']:
+                        print (str(datetime.now()) + ": Rolling back plist catalog")
+
+                    for filename in ['bookcatalog']:
+                        if prefs['debug']:
+                            print (str(datetime.now()) + ": Rolling back " + filename)
+                        move(prefs[filename] + ".bkp", prefs[filename])
+                    self.has_backup = False
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Roll back finished")
                 self.has_changed = 0
+
         except Exception:
             print (sys.exc_info()[0])
             raise
 
+    @my_profile
     def commit(self):
         try:
             if self.has_changed > 0:
+                if prefs['backup'] and not self.has_backup:
+                    for filename in ['bookcatalog']:
+                        if prefs['debug']:
+                            print (str(datetime.now()) + ": Backing up " + filename)
+                        copy2(prefs[filename], prefs[filename] + ".bkp")
+                    self.has_backup = True
                 self.__kill_ibooks()
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Commmiting library DB")
                 self.__library_db.commit()
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Commmiting series DB")
                 self.__series_db.commit()
-                writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Commmiting plist catalog")
+                writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE + ".tmp", binary=False)
+                move(self.IBOOKS_BKAGENT_CATALOG_FILE + ".tmp", self.IBOOKS_BKAGENT_CATALOG_FILE)
+                if prefs['debug']:
+                    print (str(datetime.now()) + ": Commmit finished")
                 self.has_changed = 0
         except Exception:
             print (sys.exc_info()[0])
@@ -119,12 +205,12 @@ class IbooksApi:
     #     self.observer.unschedule(self.stream)
     #     self.observer.stop()
     #     self.observer.join()
-        self.commit()
+    #     self.commit()
         del self.__series_db
         del self.__library_db
         del self.catalog
 
-    #@profile
+    @my_profile
     def add_book(self, book_id=None, title=None, collection=None, genre=None, is_explicit=None,
                  series_name=None, series_number=0, sequence_display_name=None,
                  input_path=None, author=None):
@@ -140,7 +226,7 @@ class IbooksApi:
 
                 if path.isfile(path.expanduser(input_path)):
                     asset_id = str(hashlib.md5(
-                        self.__file_as_bytes(open(path.expanduser(input_path), 'rb'))).
+                        self.__file_as_bytes(open(path.expanduser(input_path), 'rb'), size=32768)).
                                    hexdigest()).upper()
                     book_hash = asset_id
 
@@ -284,7 +370,6 @@ class IbooksApi:
 
                     self.has_changed += 1
 
-
                 else:
                     if prefs['debug']:
                         print (str(datetime.now()) + ": File not found!")
@@ -302,7 +387,6 @@ class IbooksApi:
             # Todo: add batch size as a configuration option
             if (self.has_changed % 1000 == 0):
                 self.commit()
-
             return 0
 
         except Exception:
