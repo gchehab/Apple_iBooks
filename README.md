@@ -65,7 +65,7 @@ make dist
 ## Todo list
 - [ ] Remove psutil dependency as it distributes binary that may not work on all mac os versions
 - [ ] Figure a way to transfer calibre covers that are not embeded in the book file
-- [ ] Tune performance to be able to sync some few thousand books in a single shot
+- [X] Tune performance to be able to sync some few thousand books in a single shot
 - [X] ~Update Z_PRIMARYKEY -- if not, native adding new books break~
 - [X] ~Add book to library and default collections -- need from books 2.X upwards~
 - [ ] Create installation instructions
@@ -73,9 +73,9 @@ make dist
 - [ ] Properly lock the Apple Books files during use
 - [ ] Add option to not uncompress ePub files (have to investigate its support)?
 - [ ] Add option to not create copy of all ebooks (depends on compressed epub)?
-- [ ] Implement backup option
+- [X] Implement backup option
 - [ ] Create undo, backup restore
-- [ ] Allow interrupt during sync
+- [X] Allow interrupt during sync
 - [X] ~Remove empty collections and series from ibooks (hard to figure the ones created from calibre)~
 - [X] ~Review series book grouping (disabled for now), as it seems to use storeID, iBooks thinks that all 
     grouped books were bought from apple store and has issues deleting them. Besides, it does not seem
