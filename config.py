@@ -28,7 +28,7 @@ prefs.defaults['dbseriescatalog'] = \
     path.expanduser("~/Library/Containers/com.apple.iBooksX/Data/Documents/BKSeriesDatabase/BKSeries-1-012820141020.sqlite")
 
 prefs.defaults['backup'] = True
-prefs.defaults['debug'] = True
+prefs.defaults['debug'] = False
 prefs.defaults['remove_last_synced'] = False
 
 class Ui_qWidget(object):

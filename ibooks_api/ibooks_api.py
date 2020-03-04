@@ -172,7 +172,7 @@ class IbooksApi:
             print (sys.exc_info()[0])
             raise
 
-    @my_profile
+    #@profile
     def commit(self):
         try:
             if self.has_changed > 0:
@@ -210,7 +210,7 @@ class IbooksApi:
         del self.__library_db
         del self.catalog
 
-    @my_profile
+    #@profile
     def add_book(self, book_id=None, title=None, collection=None, genre=None, is_explicit=None,
                  series_name=None, series_number=0, sequence_display_name=None,
                  input_path=None, author=None):
