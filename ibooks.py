@@ -55,3 +55,7 @@ result = ibooks.add_book(
 
 print ("Add new book result:")
 print (result)
+
+print ("Deleting allbooks from calibre")
+result = ibooks.del_all_books_from_calibre()
+print ("Delete all books result:", result)

@@ -1,49 +1,41 @@
-# postgresql/psycopg2.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# dialects/postgresql/psycopg2.py
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
+
 r"""
 .. dialect:: postgresql+psycopg2
     :name: psycopg2
     :dbapi: psycopg2
     :connectstring: postgresql+psycopg2://user:password@host:port/dbname[?key=value&key=value...]
-    :url: http://pypi.python.org/pypi/psycopg2/
+    :url: https://pypi.org/project/psycopg2/
+
+.. _psycopg2_toplevel:
 
 psycopg2 Connect Arguments
------------------------------------
+--------------------------
 
-psycopg2-specific keyword arguments which are accepted by
-:func:`.create_engine()` are:
+Keyword arguments that are specific to the SQLAlchemy psycopg2 dialect
+may be passed to :func:`_sa.create_engine()`, and include the following:
 
-* ``server_side_cursors``: Enable the usage of "server side cursors" for SQL
-  statements which support this feature. What this essentially means from a
-  psycopg2 point of view is that the cursor is created using a name, e.g.
-  ``connection.cursor('some name')``, which has the effect that result rows
-  are not immediately pre-fetched and buffered after statement execution, but
-  are instead left on the server and only retrieved as needed. SQLAlchemy's
-  :class:`~sqlalchemy.engine.ResultProxy` uses special row-buffering
-  behavior when this feature is enabled, such that groups of 100 rows at a
-  time are fetched over the wire to reduce conversational overhead.
-  Note that the :paramref:`.Connection.execution_options.stream_results`
-  execution option is a more targeted
-  way of enabling this mode on a per-execution basis.
-
-* ``use_native_unicode``: Enable the usage of Psycopg2 "native unicode" mode
-  per connection.  True by default.
-
-  .. seealso::
-
-    :ref:`psycopg2_disable_native_unicode`
 
 * ``isolation_level``: This option, available for all PostgreSQL dialects,
   includes the ``AUTOCOMMIT`` isolation level when using the psycopg2
-  dialect.
+  dialect.   This option sets the **default** isolation level for the
+  connection that is set immediately upon connection to the database before
+  the connection is pooled.  This option is generally superseded by the more
+  modern :paramref:`_engine.Connection.execution_options.isolation_level`
+  execution option, detailed at :ref:`dbapi_autocommit`.
 
   .. seealso::
 
     :ref:`psycopg2_isolation_level`
+
+    :ref:`dbapi_autocommit`
+
 
 * ``client_encoding``: sets the client encoding in a libpq-agnostic way,
   using psycopg2's ``set_client_encoding()`` method.
@@ -52,15 +44,50 @@ psycopg2-specific keyword arguments which are accepted by
 
     :ref:`psycopg2_unicode`
 
-* ``use_batch_mode``: This flag allows ``psycopg2.extras.execute_batch``
-  for ``cursor.executemany()`` calls performed by the :class:`.Engine`.
-  It is currently experimental but
-  may well become True by default as it is critical for executemany
-  performance.
+
+* ``executemany_mode``, ``executemany_batch_page_size``,
+  ``executemany_values_page_size``: Allows use of psycopg2
+  extensions for optimizing "executemany"-style queries.  See the referenced
+  section below for details.
 
   .. seealso::
 
-    :ref:`psycopg2_batch_mode`
+    :ref:`psycopg2_executemany_mode`
+
+.. tip::
+
+    The above keyword arguments are **dialect** keyword arguments, meaning
+    that they are passed as explicit keyword arguments to :func:`_sa.create_engine()`::
+
+        engine = create_engine(
+            "postgresql+psycopg2://scott:tiger@localhost/test",
+            isolation_level="SERIALIZABLE",
+        )
+
+    These should not be confused with **DBAPI** connect arguments, which
+    are passed as part of the :paramref:`_sa.create_engine.connect_args`
+    dictionary and/or are passed in the URL query string, as detailed in
+    the section :ref:`custom_dbapi_args`.
+
+.. _psycopg2_ssl:
+
+SSL Connections
+---------------
+
+The psycopg2 module has a connection argument named ``sslmode`` for
+controlling its behavior regarding secure (SSL) connections. The default is
+``sslmode=prefer``; it will attempt an SSL connection and if that fails it
+will fall back to an unencrypted connection. ``sslmode=require`` may be used
+to ensure that only secure connections are established.  Consult the
+psycopg2 / libpq documentation for further options that are available.
+
+Note that ``sslmode`` is specific to psycopg2 so it is included in the
+connection URI::
+
+    engine = sa.create_engine(
+        "postgresql+psycopg2://scott:tiger@192.168.0.199:5432/test?sslmode=require"
+    )
+
 
 Unix Domain Connections
 ------------------------
@@ -78,10 +105,77 @@ using ``host`` as an additional keyword argument::
 
     create_engine("postgresql+psycopg2://user:password@/dbname?host=/var/lib/postgresql")
 
+.. warning::  The format accepted here allows for a hostname in the main URL
+   in addition to the "host" query string argument.  **When using this URL
+   format, the initial host is silently ignored**.  That is, this URL::
+
+        engine = create_engine("postgresql+psycopg2://user:password@myhost1/dbname?host=myhost2")
+
+   Above, the hostname ``myhost1`` is **silently ignored and discarded.**  The
+   host which is connected is the ``myhost2`` host.
+
+   This is to maintain some degree of compatibility with PostgreSQL's own URL
+   format which has been tested to behave the same way and for which tools like
+   PifPaf hardcode two hostnames.
+
 .. seealso::
 
     `PQconnectdbParams \
-    <http://www.postgresql.org/docs/9.1/static/libpq-connect.html#LIBPQ-PQCONNECTDBPARAMS>`_
+    <https://www.postgresql.org/docs/current/static/libpq-connect.html#LIBPQ-PQCONNECTDBPARAMS>`_
+
+.. _psycopg2_multi_host:
+
+Specifying multiple fallback hosts
+-----------------------------------
+
+psycopg2 supports multiple connection points in the connection string.
+When the ``host`` parameter is used multiple times in the query section of
+the URL, SQLAlchemy will create a single string of the host and port
+information provided to make the connections.  Tokens may consist of
+``host::port`` or just ``host``; in the latter case, the default port
+is selected by libpq.  In the example below, three host connections
+are specified, for ``HostA::PortA``, ``HostB`` connecting to the default port,
+and ``HostC::PortC``::
+
+    create_engine(
+        "postgresql+psycopg2://user:password@/dbname?host=HostA:PortA&host=HostB&host=HostC:PortC"
+    )
+
+As an alternative, libpq query string format also may be used; this specifies
+``host`` and ``port`` as single query string arguments with comma-separated
+lists - the default port can be chosen by indicating an empty value
+in the comma separated list::
+
+    create_engine(
+        "postgresql+psycopg2://user:password@/dbname?host=HostA,HostB,HostC&port=PortA,,PortC"
+    )
+
+With either URL style, connections to each host is attempted based on a
+configurable strategy, which may be configured using the libpq
+``target_session_attrs`` parameter.  Per libpq this defaults to ``any``
+which indicates a connection to each host is then attempted until a connection is successful.
+Other strategies include ``primary``, ``prefer-standby``, etc.  The complete
+list is documented by PostgreSQL at
+`libpq connection strings <https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING>`_.
+
+For example, to indicate two hosts using the ``primary`` strategy::
+
+    create_engine(
+        "postgresql+psycopg2://user:password@/dbname?host=HostA:PortA&host=HostB&host=HostC:PortC&target_session_attrs=primary"
+    )
+
+.. versionchanged:: 1.4.40 Port specification in psycopg2 multiple host format
+   is repaired, previously ports were not correctly interpreted in this context.
+   libpq comma-separated format is also now supported.
+
+.. versionadded:: 1.3.20 Support for multiple hosts in PostgreSQL connection
+   string.
+
+.. seealso::
+
+    `libpq connection strings <https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING>`_ - please refer
+    to this section in the libpq documentation for complete background on multiple host support.
+
 
 Empty DSN Connections / Environment Variable Connections
 ---------------------------------------------------------
@@ -116,54 +210,118 @@ Per-Statement/Connection Execution Options
 -------------------------------------------
 
 The following DBAPI-specific options are respected when used with
-:meth:`.Connection.execution_options`, :meth:`.Executable.execution_options`,
-:meth:`.Query.execution_options`, in addition to those not specific to DBAPIs:
+:meth:`_engine.Connection.execution_options`,
+:meth:`.Executable.execution_options`,
+:meth:`_query.Query.execution_options`,
+in addition to those not specific to DBAPIs:
 
 * ``isolation_level`` - Set the transaction isolation level for the lifespan
-  of a :class:`.Connection` (can only be set on a connection, not a statement
+  of a :class:`_engine.Connection` (can only be set on a connection,
+  not a statement
   or query).   See :ref:`psycopg2_isolation_level`.
 
 * ``stream_results`` - Enable or disable usage of psycopg2 server side
   cursors - this feature makes use of "named" cursors in combination with
   special result handling methods so that result rows are not fully buffered.
-  If ``None`` or not set, the ``server_side_cursors`` option of the
-  :class:`.Engine` is used.
+  Defaults to False, meaning cursors are buffered by default.
 
 * ``max_row_buffer`` - when using ``stream_results``, an integer value that
   specifies the maximum number of rows to buffer at a time.  This is
-  interpreted by the :class:`.BufferedRowResultProxy`, and if omitted the
+  interpreted by the :class:`.BufferedRowCursorResult`, and if omitted the
   buffer will grow to ultimately store 1000 rows at a time.
 
-  .. versionadded:: 1.0.6
+  .. versionchanged:: 1.4  The ``max_row_buffer`` size can now be greater than
+     1000, and the buffer will grow to that size.
 
 .. _psycopg2_batch_mode:
 
-Psycopg2 Batch Mode (Fast Execution)
-------------------------------------
+.. _psycopg2_executemany_mode:
+
+Psycopg2 Fast Execution Helpers
+-------------------------------
 
 Modern versions of psycopg2 include a feature known as
 `Fast Execution Helpers \
-<http://initd.org/psycopg/docs/extras.html#fast-execution-helpers>`_,
-which have been shown in benchmarking to improve psycopg2's executemany()
-performance with INSERTS by multiple orders of magnitude.   SQLAlchemy
-allows this extension to be used for all ``executemany()`` style calls
-invoked by an :class:`.Engine` when used with :ref:`multiple parameter sets <execute_multiple>`,
-by adding the ``use_batch_mode`` flag to :func:`.create_engine`::
+<https://www.psycopg.org/docs/extras.html#fast-execution-helpers>`_, which
+have been shown in benchmarking to improve psycopg2's executemany()
+performance, primarily with INSERT statements, by at least
+an order of magnitude.
+
+SQLAlchemy implements a native form of the "insert many values"
+handler that will rewrite a single-row INSERT statement to accommodate for
+many values at once within an extended VALUES clause; this handler is
+equivalent to psycopg2's ``execute_values()`` handler; an overview of this
+feature and its configuration are at :ref:`engine_insertmanyvalues`.
+
+.. versionadded:: 2.0 Replaced psycopg2's ``execute_values()`` fast execution
+   helper with a native SQLAlchemy mechanism known as
+   :ref:`insertmanyvalues <engine_insertmanyvalues>`.
+
+The psycopg2 dialect retains the ability to use the psycopg2-specific
+``execute_batch()`` feature, although it is not expected that this is a widely
+used feature.  The use of this extension may be enabled using the
+``executemany_mode`` flag which may be passed to :func:`_sa.create_engine`::
 
     engine = create_engine(
         "postgresql+psycopg2://scott:tiger@host/dbname",
-        use_batch_mode=True)
+        executemany_mode='values_plus_batch')
 
-Batch mode is considered to be **experimental** at this time, however may
-be enabled by default in a future release.
+
+Possible options for ``executemany_mode`` include:
+
+* ``values_only`` - this is the default value.  SQLAlchemy's native
+  :ref:`insertmanyvalues <engine_insertmanyvalues>` handler is used for qualifying
+  INSERT statements, assuming
+  :paramref:`_sa.create_engine.use_insertmanyvalues` is left at
+  its default value of ``True``.  This handler rewrites simple
+  INSERT statements to include multiple VALUES clauses so that many
+  parameter sets can be inserted with one statement.
+
+* ``'values_plus_batch'``- SQLAlchemy's native
+  :ref:`insertmanyvalues <engine_insertmanyvalues>` handler is used for qualifying
+  INSERT statements, assuming
+  :paramref:`_sa.create_engine.use_insertmanyvalues` is left at its default
+  value of ``True``. Then, psycopg2's ``execute_batch()`` handler is used for
+  qualifying UPDATE and DELETE statements when executed with multiple parameter
+  sets. When using this mode, the :attr:`_engine.CursorResult.rowcount`
+  attribute will not contain a value for executemany-style executions against
+  UPDATE and DELETE statements.
+
+.. versionchanged:: 2.0 Removed the ``'batch'`` and ``'None'`` options
+   from psycopg2 ``executemany_mode``.  Control over batching for INSERT
+   statements is now configured via the
+   :paramref:`_sa.create_engine.use_insertmanyvalues` engine-level parameter.
+
+The term "qualifying statements" refers to the statement being executed
+being a Core :func:`_expression.insert`, :func:`_expression.update`
+or :func:`_expression.delete` construct, and **not** a plain textual SQL
+string or one constructed using :func:`_expression.text`.  It also may **not** be
+a special "extension" statement such as an "ON CONFLICT" "upsert" statement.
+When using the ORM, all insert/update/delete statements used by the ORM flush process
+are qualifying.
+
+The "page size" for the psycopg2 "batch" strategy can be affected
+by using the ``executemany_batch_page_size`` parameter, which defaults to
+100.
+
+For the "insertmanyvalues" feature, the page size can be controlled using the
+:paramref:`_sa.create_engine.insertmanyvalues_page_size` parameter,
+which defaults to 1000.  An example of modifying both parameters
+is below::
+
+    engine = create_engine(
+        "postgresql+psycopg2://scott:tiger@host/dbname",
+        executemany_mode='values_plus_batch',
+        insertmanyvalues_page_size=5000, executemany_batch_page_size=500)
 
 .. seealso::
 
-    :ref:`execute_multiple` - demonstrates how to use DBAPI ``executemany()``
-    with the :class:`.Connection` object.
+    :ref:`engine_insertmanyvalues` - background on "insertmanyvalues"
 
-.. versionadded:: 1.2.0
-
+    :ref:`tutorial_multiple_parameters` - General information on using the
+    :class:`_engine.Connection`
+    object to execute statements in such a way as to make
+    use of the DBAPI ``.executemany()`` method.
 
 
 .. _psycopg2_unicode:
@@ -171,13 +329,48 @@ be enabled by default in a future release.
 Unicode with Psycopg2
 ----------------------
 
-By default, the psycopg2 driver uses the ``psycopg2.extensions.UNICODE``
-extension, such that the DBAPI receives and returns all strings as Python
-Unicode objects directly - SQLAlchemy passes these values through without
-change.   Psycopg2 here will encode/decode string values based on the
-current "client encoding" setting; by default this is the value in
-the ``postgresql.conf`` file, which often defaults to ``SQL_ASCII``.
-Typically, this can be changed to ``utf8``, as a more useful default::
+The psycopg2 DBAPI driver supports Unicode data transparently.
+
+The client character encoding can be controlled for the psycopg2 dialect
+in the following ways:
+
+* For PostgreSQL 9.1 and above, the ``client_encoding`` parameter may be
+  passed in the database URL; this parameter is consumed by the underlying
+  ``libpq`` PostgreSQL client library::
+
+    engine = create_engine("postgresql+psycopg2://user:pass@host/dbname?client_encoding=utf8")
+
+  Alternatively, the above ``client_encoding`` value may be passed using
+  :paramref:`_sa.create_engine.connect_args` for programmatic establishment with
+  ``libpq``::
+
+    engine = create_engine(
+        "postgresql+psycopg2://user:pass@host/dbname",
+        connect_args={'client_encoding': 'utf8'}
+    )
+
+* For all PostgreSQL versions, psycopg2 supports a client-side encoding
+  value that will be passed to database connections when they are first
+  established.  The SQLAlchemy psycopg2 dialect supports this using the
+  ``client_encoding`` parameter passed to :func:`_sa.create_engine`::
+
+      engine = create_engine(
+          "postgresql+psycopg2://user:pass@host/dbname",
+          client_encoding="utf8"
+      )
+
+  .. tip:: The above ``client_encoding`` parameter admittedly is very similar
+      in appearance to usage of the parameter within the
+      :paramref:`_sa.create_engine.connect_args` dictionary; the difference
+      above is that the parameter is consumed by psycopg2 and is
+      passed to the database connection using ``SET client_encoding TO
+      'utf8'``; in the previously mentioned style, the parameter is instead
+      passed through psycopg2 and consumed by the ``libpq`` library.
+
+* A common way to set up client encoding with PostgreSQL databases is to
+  ensure it is configured within the server-side postgresql.conf file;
+  this is the recommended way to set encoding for a server that is
+  consistently of one encoding in all databases::
 
     # postgresql.conf file
 
@@ -185,102 +378,6 @@ Typically, this can be changed to ``utf8``, as a more useful default::
                                  # encoding
     client_encoding = utf8
 
-A second way to affect the client encoding is to set it within Psycopg2
-locally.   SQLAlchemy will call psycopg2's
-:meth:`psycopg2:connection.set_client_encoding` method
-on all new connections based on the value passed to
-:func:`.create_engine` using the ``client_encoding`` parameter::
-
-    # set_client_encoding() setting;
-    # works for *all* PostgreSQL versions
-    engine = create_engine("postgresql://user:pass@host/dbname",
-                           client_encoding='utf8')
-
-This overrides the encoding specified in the PostgreSQL client configuration.
-When using the parameter in this way, the psycopg2 driver emits
-``SET client_encoding TO 'utf8'`` on the connection explicitly, and works
-in all PostgreSQL versions.
-
-Note that the ``client_encoding`` setting as passed to :func:`.create_engine`
-is **not the same** as the more recently added ``client_encoding`` parameter
-now supported by libpq directly.   This is enabled when ``client_encoding``
-is passed directly to ``psycopg2.connect()``, and from SQLAlchemy is passed
-using the :paramref:`.create_engine.connect_args` parameter::
-
-    engine = create_engine(
-        "postgresql://user:pass@host/dbname",
-        connect_args={'client_encoding': 'utf8'})
-
-    # using the query string is equivalent
-    engine = create_engine("postgresql://user:pass@host/dbname?client_encoding=utf8")
-
-The above parameter was only added to libpq as of version 9.1 of PostgreSQL,
-so using the previous method is better for cross-version support.
-
-.. _psycopg2_disable_native_unicode:
-
-Disabling Native Unicode
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-SQLAlchemy can also be instructed to skip the usage of the psycopg2
-``UNICODE`` extension and to instead utilize its own unicode encode/decode
-services, which are normally reserved only for those DBAPIs that don't
-fully support unicode directly.  Passing ``use_native_unicode=False`` to
-:func:`.create_engine` will disable usage of ``psycopg2.extensions.UNICODE``.
-SQLAlchemy will instead encode data itself into Python bytestrings on the way
-in and coerce from bytes on the way back,
-using the value of the :func:`.create_engine` ``encoding`` parameter, which
-defaults to ``utf-8``.
-SQLAlchemy's own unicode encode/decode functionality is steadily becoming
-obsolete as most DBAPIs now support unicode fully.
-
-Bound Parameter Styles
-----------------------
-
-The default parameter style for the psycopg2 dialect is "pyformat", where
-SQL is rendered using ``%(paramname)s`` style.   This format has the limitation
-that it does not accommodate the unusual case of parameter names that
-actually contain percent or parenthesis symbols; as SQLAlchemy in many cases
-generates bound parameter names based on the name of a column, the presence
-of these characters in a column name can lead to problems.
-
-There are two solutions to the issue of a :class:`.schema.Column` that contains
-one of these characters in its name.  One is to specify the
-:paramref:`.schema.Column.key` for columns that have such names::
-
-    measurement = Table('measurement', metadata,
-        Column('Size (meters)', Integer, key='size_meters')
-    )
-
-Above, an INSERT statement such as ``measurement.insert()`` will use
-``size_meters`` as the parameter name, and a SQL expression such as
-``measurement.c.size_meters > 10`` will derive the bound parameter name
-from the ``size_meters`` key as well.
-
-.. versionchanged:: 1.0.0 - SQL expressions will use :attr:`.Column.key`
-   as the source of naming when anonymous bound parameters are created
-   in SQL expressions; previously, this behavior only applied to
-   :meth:`.Table.insert` and :meth:`.Table.update` parameter names.
-
-The other solution is to use a positional format; psycopg2 allows use of the
-"format" paramstyle, which can be passed to
-:paramref:`.create_engine.paramstyle`::
-
-    engine = create_engine(
-        'postgresql://scott:tiger@localhost:5432/test', paramstyle='format')
-
-With the above engine, instead of a statement like::
-
-    INSERT INTO measurement ("Size (meters)") VALUES (%(Size (meters))s)
-    {'Size (meters)': 1}
-
-we instead see::
-
-    INSERT INTO measurement ("Size (meters)") VALUES (%s)
-    (1, )
-
-Where above, the dictionary style is converted into a tuple with positional
-style.
 
 
 Transactions
@@ -295,9 +392,11 @@ Psycopg2 Transaction Isolation Level
 
 As discussed in :ref:`postgresql_isolation_level`,
 all PostgreSQL dialects support setting of transaction isolation level
-both via the ``isolation_level`` parameter passed to :func:`.create_engine`,
+both via the ``isolation_level`` parameter passed to :func:`_sa.create_engine`
+,
 as well as the ``isolation_level`` argument used by
-:meth:`.Connection.execution_options`.  When using the psycopg2 dialect, these
+:meth:`_engine.Connection.execution_options`.  When using the psycopg2 dialect
+, these
 options make use of psycopg2's ``set_isolation_level()`` connection method,
 rather than emitting a PostgreSQL directive; this is because psycopg2's
 API-level setting is always emitted at the start of each transaction in any
@@ -322,10 +421,24 @@ NOTICE logging
 ---------------
 
 The psycopg2 dialect will log PostgreSQL NOTICE messages
-via the ``sqlalchemy.dialects.postgresql`` logger::
+via the ``sqlalchemy.dialects.postgresql`` logger.  When this logger
+is set to the ``logging.INFO`` level, notice messages will be logged::
 
     import logging
+
     logging.getLogger('sqlalchemy.dialects.postgresql').setLevel(logging.INFO)
+
+Above, it is assumed that logging is configured externally.  If this is not
+the case, configuration such as ``logging.basicConfig()`` must be utilized::
+
+    import logging
+
+    logging.basicConfig()   # log messages to stdout
+    logging.getLogger('sqlalchemy.dialects.postgresql').setLevel(logging.INFO)
+
+.. seealso::
+
+    `Logging HOWTO <https://docs.python.org/3/howto/logging.html>`_ - on the python.org website
 
 .. _psycopg2_hstore:
 
@@ -369,158 +482,101 @@ place within SQLAlchemy's own marshalling logic, and not that of ``psycopg2``
 which may be more performant.
 
 """  # noqa
-from __future__ import absolute_import
+from __future__ import annotations
 
-import decimal
+import collections.abc as collections_abc
 import logging
 import re
+from typing import cast
 
-from .base import _DECIMAL_TYPES
-from .base import _FLOAT_TYPES
-from .base import _INT_TYPES
-from .base import ENUM
-from .base import PGCompiler
-from .base import PGDialect
-from .base import PGExecutionContext
+from . import ranges
+from ._psycopg_common import _PGDialect_common_psycopg
+from ._psycopg_common import _PGExecutionContext_common_psycopg
 from .base import PGIdentifierPreparer
-from .base import UUID
-from .hstore import HSTORE
 from .json import JSON
 from .json import JSONB
-from ... import exc
-from ... import processors
 from ... import types as sqltypes
 from ... import util
-from ...engine import result as _result
-
-
-try:
-    from uuid import UUID as _python_UUID  # noqa
-except ImportError:
-    _python_UUID = None
-
+from ...util import FastIntFlag
+from ...util import parse_user_argument_for_enum
 
 logger = logging.getLogger("sqlalchemy.dialects.postgresql")
 
 
-class _PGNumeric(sqltypes.Numeric):
-    def bind_processor(self, dialect):
-        return None
-
-    def result_processor(self, dialect, coltype):
-        if self.asdecimal:
-            if coltype in _FLOAT_TYPES:
-                return processors.to_decimal_processor_factory(
-                    decimal.Decimal, self._effective_decimal_return_scale
-                )
-            elif coltype in _DECIMAL_TYPES or coltype in _INT_TYPES:
-                # pg8000 returns Decimal natively for 1700
-                return None
-            else:
-                raise exc.InvalidRequestError(
-                    "Unknown PG numeric type: %d" % coltype
-                )
-        else:
-            if coltype in _FLOAT_TYPES:
-                # pg8000 returns float natively for 701
-                return None
-            elif coltype in _DECIMAL_TYPES or coltype in _INT_TYPES:
-                return processors.to_float
-            else:
-                raise exc.InvalidRequestError(
-                    "Unknown PG numeric type: %d" % coltype
-                )
-
-
-class _PGEnum(ENUM):
-    def result_processor(self, dialect, coltype):
-        if util.py2k and self._expect_unicode is True:
-            # for py2k, if the enum type needs unicode data (which is set up as
-            # part of the Enum() constructor based on values passed as py2k
-            # unicode objects) we have to use our own converters since
-            # psycopg2's don't work, a rare exception to the "modern DBAPIs
-            # support unicode everywhere" theme of deprecating
-            # convert_unicode=True. Use the special "force_nocheck" directive
-            # which forces unicode conversion to happen on the Python side
-            # without an isinstance() check.   in py3k psycopg2 does the right
-            # thing automatically.
-            self._expect_unicode = "force_nocheck"
-        return super(_PGEnum, self).result_processor(dialect, coltype)
-
-
-class _PGHStore(HSTORE):
-    def bind_processor(self, dialect):
-        if dialect._has_native_hstore:
-            return None
-        else:
-            return super(_PGHStore, self).bind_processor(dialect)
-
-    def result_processor(self, dialect, coltype):
-        if dialect._has_native_hstore:
-            return None
-        else:
-            return super(_PGHStore, self).result_processor(dialect, coltype)
-
-
 class _PGJSON(JSON):
     def result_processor(self, dialect, coltype):
-        if dialect._has_native_json:
-            return None
-        else:
-            return super(_PGJSON, self).result_processor(dialect, coltype)
+        return None
 
 
 class _PGJSONB(JSONB):
     def result_processor(self, dialect, coltype):
-        if dialect._has_native_jsonb:
-            return None
-        else:
-            return super(_PGJSONB, self).result_processor(dialect, coltype)
+        return None
 
 
-class _PGUUID(UUID):
+class _Psycopg2Range(ranges.AbstractSingleRangeImpl):
+    _psycopg2_range_cls = "none"
+
     def bind_processor(self, dialect):
-        if not self.as_uuid and dialect.use_native_uuid:
+        psycopg2_Range = getattr(
+            cast(PGDialect_psycopg2, dialect)._psycopg2_extras,
+            self._psycopg2_range_cls,
+        )
 
-            def process(value):
-                if value is not None:
-                    value = _python_UUID(value)
-                return value
+        def to_range(value):
+            if isinstance(value, ranges.Range):
+                value = psycopg2_Range(
+                    value.lower, value.upper, value.bounds, value.empty
+                )
+            return value
 
-            return process
+        return to_range
 
     def result_processor(self, dialect, coltype):
-        if not self.as_uuid and dialect.use_native_uuid:
+        def to_range(value):
+            if value is not None:
+                value = ranges.Range(
+                    value._lower,
+                    value._upper,
+                    bounds=value._bounds if value._bounds else "[)",
+                    empty=not value._bounds,
+                )
+            return value
 
-            def process(value):
-                if value is not None:
-                    value = str(value)
-                return value
-
-            return process
+        return to_range
 
 
-_server_side_id = util.counter()
+class _Psycopg2NumericRange(_Psycopg2Range):
+    _psycopg2_range_cls = "NumericRange"
 
 
-class PGExecutionContext_psycopg2(PGExecutionContext):
-    def create_server_side_cursor(self):
-        # use server-side cursors:
-        # http://lists.initd.org/pipermail/psycopg/2007-January/005251.html
-        ident = "c_%s_%s" % (hex(id(self))[2:], hex(_server_side_id())[2:])
-        return self._dbapi_connection.cursor(ident)
+class _Psycopg2DateRange(_Psycopg2Range):
+    _psycopg2_range_cls = "DateRange"
 
-    def get_result_proxy(self):
-        # TODO: ouch
-        if logger.isEnabledFor(logging.INFO):
-            self._log_notices(self.cursor)
 
-        if self._is_server_side:
-            return _result.BufferedRowResultProxy(self)
-        else:
-            return _result.ResultProxy(self)
+class _Psycopg2DateTimeRange(_Psycopg2Range):
+    _psycopg2_range_cls = "DateTimeRange"
+
+
+class _Psycopg2DateTimeTZRange(_Psycopg2Range):
+    _psycopg2_range_cls = "DateTimeTZRange"
+
+
+class PGExecutionContext_psycopg2(_PGExecutionContext_common_psycopg):
+    _psycopg2_fetched_rows = None
+
+    def post_exec(self):
+        self._log_notices(self.cursor)
 
     def _log_notices(self, cursor):
+        # check also that notices is an iterable, after it's already
+        # established that we will be iterating through it.  This is to get
+        # around test suites such as SQLAlchemy's using a Mock object for
+        # cursor
+        if not cursor.connection.notices or not isinstance(
+            cursor.connection.notices, collections_abc.Iterable
+        ):
+            return
+
         for notice in cursor.connection.notices:
             # NOTICE messages have a
             # newline character at the end
@@ -529,77 +585,82 @@ class PGExecutionContext_psycopg2(PGExecutionContext):
         cursor.connection.notices[:] = []
 
 
-class PGCompiler_psycopg2(PGCompiler):
-    pass
-
-
 class PGIdentifierPreparer_psycopg2(PGIdentifierPreparer):
     pass
 
 
-class PGDialect_psycopg2(PGDialect):
-    driver = "psycopg2"
-    if util.py2k:
-        supports_unicode_statements = False
+class ExecutemanyMode(FastIntFlag):
+    EXECUTEMANY_VALUES = 0
+    EXECUTEMANY_VALUES_PLUS_BATCH = 1
 
+
+(
+    EXECUTEMANY_VALUES,
+    EXECUTEMANY_VALUES_PLUS_BATCH,
+) = ExecutemanyMode.__members__.values()
+
+
+class PGDialect_psycopg2(_PGDialect_common_psycopg):
+    driver = "psycopg2"
+
+    supports_statement_cache = True
     supports_server_side_cursors = True
 
     default_paramstyle = "pyformat"
     # set to true based on psycopg2 version
     supports_sane_multi_rowcount = False
     execution_ctx_cls = PGExecutionContext_psycopg2
-    statement_compiler = PGCompiler_psycopg2
     preparer = PGIdentifierPreparer_psycopg2
     psycopg2_version = (0, 0)
+    use_insertmanyvalues_wo_returning = True
 
-    FEATURE_VERSION_MAP = dict(
-        native_json=(2, 5),
-        native_jsonb=(2, 5, 4),
-        sane_multi_rowcount=(2, 0, 9),
-        array_oid=(2, 4, 3),
-        hstore_adapter=(2, 4),
-    )
+    returns_native_bytes = False
 
-    _has_native_hstore = False
-    _has_native_json = False
-    _has_native_jsonb = False
-
-    engine_config_types = PGDialect.engine_config_types.union(
-        [("use_native_unicode", util.asbool)]
-    )
+    _has_native_hstore = True
 
     colspecs = util.update_copy(
-        PGDialect.colspecs,
+        _PGDialect_common_psycopg.colspecs,
         {
-            sqltypes.Numeric: _PGNumeric,
-            ENUM: _PGEnum,  # needs force_unicode
-            sqltypes.Enum: _PGEnum,  # needs force_unicode
-            HSTORE: _PGHStore,
             JSON: _PGJSON,
             sqltypes.JSON: _PGJSON,
             JSONB: _PGJSONB,
-            UUID: _PGUUID,
+            ranges.INT4RANGE: _Psycopg2NumericRange,
+            ranges.INT8RANGE: _Psycopg2NumericRange,
+            ranges.NUMRANGE: _Psycopg2NumericRange,
+            ranges.DATERANGE: _Psycopg2DateRange,
+            ranges.TSRANGE: _Psycopg2DateTimeRange,
+            ranges.TSTZRANGE: _Psycopg2DateTimeTZRange,
         },
     )
 
     def __init__(
         self,
-        server_side_cursors=False,
-        use_native_unicode=True,
-        client_encoding=None,
-        use_native_hstore=True,
-        use_native_uuid=True,
-        use_batch_mode=False,
-        **kwargs
+        executemany_mode="values_only",
+        executemany_batch_page_size=100,
+        **kwargs,
     ):
-        PGDialect.__init__(self, **kwargs)
-        self.server_side_cursors = server_side_cursors
-        self.use_native_unicode = use_native_unicode
-        self.use_native_hstore = use_native_hstore
-        self.use_native_uuid = use_native_uuid
-        self.supports_unicode_binds = use_native_unicode
-        self.client_encoding = client_encoding
-        self.psycopg2_batch_mode = use_batch_mode
+        _PGDialect_common_psycopg.__init__(self, **kwargs)
+
+        if self._native_inet_types:
+            raise NotImplementedError(
+                "The psycopg2 dialect does not implement "
+                "ipaddress type handling; native_inet_types cannot be set "
+                "to ``True`` when using this dialect."
+            )
+
+        # Parse executemany_mode argument, allowing it to be only one of the
+        # symbol names
+        self.executemany_mode = parse_user_argument_for_enum(
+            executemany_mode,
+            {
+                EXECUTEMANY_VALUES: ["values_only"],
+                EXECUTEMANY_VALUES_PLUS_BATCH: ["values_plus_batch"],
+            },
+            "executemany_mode",
+        )
+
+        self.executemany_batch_page_size = executemany_batch_page_size
+
         if self.dbapi and hasattr(self.dbapi, "__version__"):
             m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", self.dbapi.__version__)
             if m:
@@ -607,39 +668,36 @@ class PGDialect_psycopg2(PGDialect):
                     int(x) for x in m.group(1, 2, 3) if x is not None
                 )
 
+            if self.psycopg2_version < (2, 7):
+                raise ImportError(
+                    "psycopg2 version 2.7 or higher is required."
+                )
+
     def initialize(self, connection):
-        super(PGDialect_psycopg2, self).initialize(connection)
+        super().initialize(connection)
         self._has_native_hstore = (
             self.use_native_hstore
-            and self._hstore_oids(connection.connection) is not None
-        )
-        self._has_native_json = (
-            self.psycopg2_version >= self.FEATURE_VERSION_MAP["native_json"]
-        )
-        self._has_native_jsonb = (
-            self.psycopg2_version >= self.FEATURE_VERSION_MAP["native_jsonb"]
+            and self._hstore_oids(connection.connection.dbapi_connection)
+            is not None
         )
 
-        # http://initd.org/psycopg/docs/news.html#what-s-new-in-psycopg-2-0-9
         self.supports_sane_multi_rowcount = (
-            self.psycopg2_version
-            >= self.FEATURE_VERSION_MAP["sane_multi_rowcount"]
-            and not self.psycopg2_batch_mode
+            self.executemany_mode is not EXECUTEMANY_VALUES_PLUS_BATCH
         )
 
     @classmethod
-    def dbapi(cls):
+    def import_dbapi(cls):
         import psycopg2
 
         return psycopg2
 
-    @classmethod
+    @util.memoized_property
     def _psycopg2_extensions(cls):
         from psycopg2 import extensions
 
         return extensions
 
-    @classmethod
+    @util.memoized_property
     def _psycopg2_extras(cls):
         from psycopg2 import extras
 
@@ -647,7 +705,7 @@ class PGDialect_psycopg2(PGDialect):
 
     @util.memoized_property
     def _isolation_lookup(self):
-        extensions = self._psycopg2_extensions()
+        extensions = self._psycopg2_extensions
         return {
             "AUTOCOMMIT": extensions.ISOLATION_LEVEL_AUTOCOMMIT,
             "READ COMMITTED": extensions.ISOLATION_LEVEL_READ_COMMITTED,
@@ -656,127 +714,123 @@ class PGDialect_psycopg2(PGDialect):
             "SERIALIZABLE": extensions.ISOLATION_LEVEL_SERIALIZABLE,
         }
 
-    def set_isolation_level(self, connection, level):
-        try:
-            level = self._isolation_lookup[level.replace("_", " ")]
-        except KeyError:
-            raise exc.ArgumentError(
-                "Invalid value '%s' for isolation_level. "
-                "Valid isolation levels for %s are %s"
-                % (level, self.name, ", ".join(self._isolation_lookup))
-            )
+    def set_isolation_level(self, dbapi_connection, level):
+        dbapi_connection.set_isolation_level(self._isolation_lookup[level])
 
-        connection.set_isolation_level(level)
+    def set_readonly(self, connection, value):
+        connection.readonly = value
+
+    def get_readonly(self, connection):
+        return connection.readonly
+
+    def set_deferrable(self, connection, value):
+        connection.deferrable = value
+
+    def get_deferrable(self, connection):
+        return connection.deferrable
 
     def on_connect(self):
-        extras = self._psycopg2_extras()
-        extensions = self._psycopg2_extensions()
+        extras = self._psycopg2_extras
 
         fns = []
         if self.client_encoding is not None:
 
-            def on_connect(conn):
-                conn.set_client_encoding(self.client_encoding)
+            def on_connect(dbapi_conn):
+                dbapi_conn.set_client_encoding(self.client_encoding)
 
             fns.append(on_connect)
 
-        if self.isolation_level is not None:
+        if self.dbapi:
 
-            def on_connect(conn):
-                self.set_isolation_level(conn, self.isolation_level)
-
-            fns.append(on_connect)
-
-        if self.dbapi and self.use_native_uuid:
-
-            def on_connect(conn):
-                extras.register_uuid(None, conn)
-
-            fns.append(on_connect)
-
-        if self.dbapi and self.use_native_unicode:
-
-            def on_connect(conn):
-                extensions.register_type(extensions.UNICODE, conn)
-                extensions.register_type(extensions.UNICODEARRAY, conn)
+            def on_connect(dbapi_conn):
+                extras.register_uuid(None, dbapi_conn)
 
             fns.append(on_connect)
 
         if self.dbapi and self.use_native_hstore:
 
-            def on_connect(conn):
-                hstore_oids = self._hstore_oids(conn)
+            def on_connect(dbapi_conn):
+                hstore_oids = self._hstore_oids(dbapi_conn)
                 if hstore_oids is not None:
                     oid, array_oid = hstore_oids
                     kw = {"oid": oid}
-                    if util.py2k:
-                        kw["unicode"] = True
-                    if (
-                        self.psycopg2_version
-                        >= self.FEATURE_VERSION_MAP["array_oid"]
-                    ):
-                        kw["array_oid"] = array_oid
-                    extras.register_hstore(conn, **kw)
+                    kw["array_oid"] = array_oid
+                    extras.register_hstore(dbapi_conn, **kw)
 
             fns.append(on_connect)
 
         if self.dbapi and self._json_deserializer:
 
-            def on_connect(conn):
-                if self._has_native_json:
-                    extras.register_default_json(
-                        conn, loads=self._json_deserializer
-                    )
-                if self._has_native_jsonb:
-                    extras.register_default_jsonb(
-                        conn, loads=self._json_deserializer
-                    )
+            def on_connect(dbapi_conn):
+                extras.register_default_json(
+                    dbapi_conn, loads=self._json_deserializer
+                )
+                extras.register_default_jsonb(
+                    dbapi_conn, loads=self._json_deserializer
+                )
 
             fns.append(on_connect)
 
         if fns:
 
-            def on_connect(conn):
+            def on_connect(dbapi_conn):
                 for fn in fns:
-                    fn(conn)
+                    fn(dbapi_conn)
 
             return on_connect
         else:
             return None
 
     def do_executemany(self, cursor, statement, parameters, context=None):
-        if self.psycopg2_batch_mode:
-            extras = self._psycopg2_extras()
-            extras.execute_batch(cursor, statement, parameters)
+        if self.executemany_mode is EXECUTEMANY_VALUES_PLUS_BATCH:
+            if self.executemany_batch_page_size:
+                kwargs = {"page_size": self.executemany_batch_page_size}
+            else:
+                kwargs = {}
+            self._psycopg2_extras.execute_batch(
+                cursor, statement, parameters, **kwargs
+            )
         else:
             cursor.executemany(statement, parameters)
 
-    @util.memoized_instancemethod
-    def _hstore_oids(self, conn):
-        if self.psycopg2_version >= self.FEATURE_VERSION_MAP["hstore_adapter"]:
-            extras = self._psycopg2_extras()
-            oids = extras.HstoreAdapter.get_oids(conn)
-            if oids is not None and oids[0]:
-                return oids[0:2]
-        return None
+    def do_begin_twophase(self, connection, xid):
+        connection.connection.tpc_begin(xid)
 
-    def create_connect_args(self, url):
-        opts = url.translate_connect_args(username="user")
-        if opts:
-            if "port" in opts:
-                opts["port"] = int(opts["port"])
-            opts.update(url.query)
-            # send individual dbname, user, password, host, port
-            # parameters to psycopg2.connect()
-            return ([], opts)
-        elif url.query:
-            # any other connection arguments, pass directly
-            opts.update(url.query)
-            return ([], opts)
+    def do_prepare_twophase(self, connection, xid):
+        connection.connection.tpc_prepare()
+
+    def _do_twophase(self, dbapi_conn, operation, xid, recover=False):
+        if recover:
+            if dbapi_conn.status != self._psycopg2_extensions.STATUS_READY:
+                dbapi_conn.rollback()
+            operation(xid)
         else:
-            # no connection arguments whatsoever; psycopg2.connect()
-            # requires that "dsn" be present as a blank string.
-            return ([""], opts)
+            operation()
+
+    def do_rollback_twophase(
+        self, connection, xid, is_prepared=True, recover=False
+    ):
+        dbapi_conn = connection.connection.dbapi_connection
+        self._do_twophase(
+            dbapi_conn, dbapi_conn.tpc_rollback, xid, recover=recover
+        )
+
+    def do_commit_twophase(
+        self, connection, xid, is_prepared=True, recover=False
+    ):
+        dbapi_conn = connection.connection.dbapi_connection
+        self._do_twophase(
+            dbapi_conn, dbapi_conn.tpc_commit, xid, recover=recover
+        )
+
+    @util.memoized_instancemethod
+    def _hstore_oids(self, dbapi_connection):
+        extras = self._psycopg2_extras
+        oids = extras.HstoreAdapter.get_oids(dbapi_connection)
+        if oids is not None and oids[0]:
+            return oids[0:2]
+        else:
+            return None
 
     def is_disconnect(self, e, connection, cursor):
         if isinstance(e, self.dbapi.Error):
@@ -790,32 +844,43 @@ class PGDialect_psycopg2(PGDialect):
             # checks based on strings.  in the case that .closed
             # didn't cut it, fall back onto these.
             str_e = str(e).partition("\n")[0]
-            for msg in [
-                # these error messages from libpq: interfaces/libpq/fe-misc.c
-                # and interfaces/libpq/fe-secure.c.
-                "terminating connection",
-                "closed the connection",
-                "connection not open",
-                "could not receive data from server",
-                "could not send data to server",
-                # psycopg2 client errors, psycopg2/conenction.h,
-                # psycopg2/cursor.h
-                "connection already closed",
-                "cursor already closed",
-                # not sure where this path is originally from, it may
-                # be obsolete.   It really says "losed", not "closed".
-                "losed the connection unexpectedly",
-                # these can occur in newer SSL
-                "connection has been closed unexpectedly",
-                "SSL SYSCALL error: Bad file descriptor",
-                "SSL SYSCALL error: EOF detected",
-                "SSL error: decryption failed or bad record mac",
-                "SSL SYSCALL error: Operation timed out",
-            ]:
+            for msg in self._is_disconnect_messages:
                 idx = str_e.find(msg)
                 if idx >= 0 and '"' not in str_e[:idx]:
                     return True
         return False
+
+    @util.memoized_property
+    def _is_disconnect_messages(self):
+        return (
+            # these error messages from libpq: interfaces/libpq/fe-misc.c
+            # and interfaces/libpq/fe-secure.c.
+            "terminating connection",
+            "closed the connection",
+            "connection not open",
+            "could not receive data from server",
+            "could not send data to server",
+            # psycopg2 client errors, psycopg2/connection.h,
+            # psycopg2/cursor.h
+            "connection already closed",
+            "cursor already closed",
+            # not sure where this path is originally from, it may
+            # be obsolete.   It really says "losed", not "closed".
+            "losed the connection unexpectedly",
+            # these can occur in newer SSL
+            "connection has been closed unexpectedly",
+            "SSL error: decryption failed or bad record mac",
+            "SSL SYSCALL error: Bad file descriptor",
+            "SSL SYSCALL error: EOF detected",
+            "SSL SYSCALL error: Operation timed out",
+            "SSL SYSCALL error: Bad address",
+            # This can occur in OpenSSL 1 when an unexpected EOF occurs.
+            # https://www.openssl.org/docs/man1.1.1/man3/SSL_get_error.html#BUGS
+            # It may also occur in newer OpenSSL for a non-recoverable I/O
+            # error as a result of a system call that does not set 'errno'
+            # in libc.
+            "SSL SYSCALL error: Success",
+        )
 
 
 dialect = PGDialect_psycopg2

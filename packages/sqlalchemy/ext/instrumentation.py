@@ -1,3 +1,11 @@
+# ext/instrumentation.py
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
+# <see AUTHORS file>
+#
+# This module is part of SQLAlchemy and is released under
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
+
 """Extensible class instrumentation.
 
 The :mod:`sqlalchemy.ext.instrumentation` package provides for alternate
@@ -23,8 +31,10 @@ from ..orm import base as orm_base
 from ..orm import collections
 from ..orm import exc as orm_exc
 from ..orm import instrumentation as orm_instrumentation
+from ..orm import util as orm_util
 from ..orm.instrumentation import _default_dict_getter
 from ..orm.instrumentation import _default_manager_getter
+from ..orm.instrumentation import _default_opt_manager_getter
 from ..orm.instrumentation import _default_state_getter
 from ..orm.instrumentation import ClassManager
 from ..orm.instrumentation import InstrumentationFactory
@@ -42,10 +52,10 @@ inheritance hierarchy.
 The value of this attribute must be a callable and will be passed a class
 object.  The callable must return one of:
 
-  - An instance of an InstrumentationManager or subclass
+  - An instance of an :class:`.InstrumentationManager` or subclass
   - An object implementing all or some of InstrumentationManager (TODO)
   - A dictionary of callables, implementing all or some of the above (TODO)
-  - An instance of a ClassManager or subclass
+  - An instance of a :class:`.ClassManager` or subclass
 
 This attribute is consulted by SQLAlchemy instrumentation
 resolution, once the :mod:`sqlalchemy.ext.instrumentation` module
@@ -140,7 +150,7 @@ class ExtendedInstrumentationRegistry(InstrumentationFactory):
         hierarchy = util.class_hierarchy(cls)
         factories = set()
         for member in hierarchy:
-            manager = self.manager_of_class(member)
+            manager = self.opt_manager_of_class(member)
             if manager is not None:
                 factories.add(manager.factory)
             else:
@@ -155,22 +165,39 @@ class ExtendedInstrumentationRegistry(InstrumentationFactory):
         return factories
 
     def unregister(self, class_):
+        super().unregister(class_)
         if class_ in self._manager_finders:
             del self._manager_finders[class_]
             del self._state_finders[class_]
             del self._dict_finders[class_]
-        super(ExtendedInstrumentationRegistry, self).unregister(class_)
 
-    def manager_of_class(self, cls):
-        if cls is None:
-            return None
+    def opt_manager_of_class(self, cls):
         try:
-            finder = self._manager_finders.get(cls, _default_manager_getter)
+            finder = self._manager_finders.get(
+                cls, _default_opt_manager_getter
+            )
         except TypeError:
             # due to weakref lookup on invalid object
             return None
         else:
             return finder(cls)
+
+    def manager_of_class(self, cls):
+        try:
+            finder = self._manager_finders.get(cls, _default_manager_getter)
+        except TypeError:
+            # due to weakref lookup on invalid object
+            raise orm_exc.UnmappedClassError(
+                cls, f"Can't locate an instrumentation manager for class {cls}"
+            )
+        else:
+            manager = finder(cls)
+            if manager is None:
+                raise orm_exc.UnmappedClassError(
+                    cls,
+                    f"Can't locate an instrumentation manager for class {cls}",
+                )
+            return manager
 
     def state_of(self, instance):
         if instance is None:
@@ -187,13 +214,13 @@ class ExtendedInstrumentationRegistry(InstrumentationFactory):
         )(instance)
 
 
-orm_instrumentation._instrumentation_factory = (
-    _instrumentation_factory
-) = ExtendedInstrumentationRegistry()
+orm_instrumentation._instrumentation_factory = _instrumentation_factory = (
+    ExtendedInstrumentationRegistry()
+)
 orm_instrumentation.instrumentation_finders = instrumentation_finders
 
 
-class InstrumentationManager(object):
+class InstrumentationManager:
     """User-defined class instrumentation extension.
 
     :class:`.InstrumentationManager` can be subclassed in order
@@ -220,7 +247,7 @@ class InstrumentationManager(object):
     def manage(self, class_, manager):
         setattr(class_, "_default_class_manager", manager)
 
-    def dispose(self, class_, manager):
+    def unregister(self, class_, manager):
         delattr(class_, "_default_class_manager")
 
     def manager_getter(self, class_):
@@ -282,8 +309,8 @@ class _ClassInstrumentationAdapter(ClassManager):
     def manage(self):
         self._adapted.manage(self.class_, self)
 
-    def dispose(self):
-        self._adapted.dispose(self.class_)
+    def unregister(self):
+        self._adapted.unregister(self.class_, self)
 
     def manager_getter(self):
         return self._adapted.manager_getter(self.class_)
@@ -294,7 +321,7 @@ class _ClassInstrumentationAdapter(ClassManager):
             self._adapted.instrument_attribute(self.class_, key, inst)
 
     def post_configure_attribute(self, key):
-        super(_ClassInstrumentationAdapter, self).post_configure_attribute(key)
+        super().post_configure_attribute(key)
         self._adapted.post_configure_attribute(self.class_, key, self[key])
 
     def install_descriptor(self, key, inst):
@@ -384,6 +411,7 @@ def _install_instrumented_lookups():
             instance_state=_instrumentation_factory.state_of,
             instance_dict=_instrumentation_factory.dict_of,
             manager_of_class=_instrumentation_factory.manager_of_class,
+            opt_manager_of_class=_instrumentation_factory.opt_manager_of_class,
         )
     )
 
@@ -395,22 +423,28 @@ def _reinstall_default_lookups():
             instance_state=_default_state_getter,
             instance_dict=_default_dict_getter,
             manager_of_class=_default_manager_getter,
+            opt_manager_of_class=_default_opt_manager_getter,
         )
     )
     _instrumentation_factory._extended = False
 
 
 def _install_lookups(lookups):
-    global instance_state, instance_dict, manager_of_class
+    global instance_state, instance_dict
+    global manager_of_class, opt_manager_of_class
     instance_state = lookups["instance_state"]
     instance_dict = lookups["instance_dict"]
     manager_of_class = lookups["manager_of_class"]
-    orm_base.instance_state = (
-        attributes.instance_state
-    ) = orm_instrumentation.instance_state = instance_state
-    orm_base.instance_dict = (
-        attributes.instance_dict
-    ) = orm_instrumentation.instance_dict = instance_dict
-    orm_base.manager_of_class = (
-        attributes.manager_of_class
-    ) = orm_instrumentation.manager_of_class = manager_of_class
+    opt_manager_of_class = lookups["opt_manager_of_class"]
+    orm_base.instance_state = attributes.instance_state = (
+        orm_instrumentation.instance_state
+    ) = instance_state
+    orm_base.instance_dict = attributes.instance_dict = (
+        orm_instrumentation.instance_dict
+    ) = instance_dict
+    orm_base.manager_of_class = attributes.manager_of_class = (
+        orm_instrumentation.manager_of_class
+    ) = manager_of_class
+    orm_base.opt_manager_of_class = orm_util.opt_manager_of_class = (
+        attributes.opt_manager_of_class
+    ) = orm_instrumentation.opt_manager_of_class = opt_manager_of_class

@@ -1,65 +1,26 @@
-# postgresql/hstore.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# dialects/postgresql/hstore.py
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
+
 
 import re
 
 from .array import ARRAY
-from .base import ischema_names
+from .operators import CONTAINED_BY
+from .operators import CONTAINS
+from .operators import GETITEM
+from .operators import HAS_ALL
+from .operators import HAS_ANY
+from .operators import HAS_KEY
 from ... import types as sqltypes
-from ... import util
 from ...sql import functions as sqlfunc
-from ...sql import operators
 
 
 __all__ = ("HSTORE", "hstore")
-
-idx_precedence = operators._PRECEDENCE[operators.json_getitem_op]
-
-GETITEM = operators.custom_op(
-    "->",
-    precedence=idx_precedence,
-    natural_self_precedent=True,
-    eager_grouping=True,
-)
-
-HAS_KEY = operators.custom_op(
-    "?",
-    precedence=idx_precedence,
-    natural_self_precedent=True,
-    eager_grouping=True,
-)
-
-HAS_ALL = operators.custom_op(
-    "?&",
-    precedence=idx_precedence,
-    natural_self_precedent=True,
-    eager_grouping=True,
-)
-
-HAS_ANY = operators.custom_op(
-    "?|",
-    precedence=idx_precedence,
-    natural_self_precedent=True,
-    eager_grouping=True,
-)
-
-CONTAINS = operators.custom_op(
-    "@>",
-    precedence=idx_precedence,
-    natural_self_precedent=True,
-    eager_grouping=True,
-)
-
-CONTAINED_BY = operators.custom_op(
-    "<@",
-    precedence=idx_precedence,
-    natural_self_precedent=True,
-    eager_grouping=True,
-)
 
 
 class HSTORE(sqltypes.Indexable, sqltypes.Concatenable, sqltypes.TypeEngine):
@@ -97,34 +58,38 @@ class HSTORE(sqltypes.Indexable, sqltypes.Concatenable, sqltypes.TypeEngine):
     For a full list of special methods see
     :class:`.HSTORE.comparator_factory`.
 
-    For usage with the SQLAlchemy ORM, it may be desirable to combine
-    the usage of :class:`.HSTORE` with :class:`.MutableDict` dictionary
-    now part of the :mod:`sqlalchemy.ext.mutable`
-    extension.  This extension will allow "in-place" changes to the
-    dictionary, e.g. addition of new keys or replacement/removal of existing
-    keys to/from the current dictionary, to produce events which will be
-    detected by the unit of work::
+    .. container:: topic
 
-        from sqlalchemy.ext.mutable import MutableDict
+        **Detecting Changes in HSTORE columns when using the ORM**
 
-        class MyClass(Base):
-            __tablename__ = 'data_table'
+        For usage with the SQLAlchemy ORM, it may be desirable to combine the
+        usage of :class:`.HSTORE` with :class:`.MutableDict` dictionary now
+        part of the :mod:`sqlalchemy.ext.mutable` extension. This extension
+        will allow "in-place" changes to the dictionary, e.g. addition of new
+        keys or replacement/removal of existing keys to/from the current
+        dictionary, to produce events which will be detected by the unit of
+        work::
 
-            id = Column(Integer, primary_key=True)
-            data = Column(MutableDict.as_mutable(HSTORE))
+            from sqlalchemy.ext.mutable import MutableDict
 
-        my_object = session.query(MyClass).one()
+            class MyClass(Base):
+                __tablename__ = 'data_table'
 
-        # in-place mutation, requires Mutable extension
-        # in order for the ORM to detect
-        my_object.data['some_key'] = 'some value'
+                id = Column(Integer, primary_key=True)
+                data = Column(MutableDict.as_mutable(HSTORE))
 
-        session.commit()
+            my_object = session.query(MyClass).one()
 
-    When the :mod:`sqlalchemy.ext.mutable` extension is not used, the ORM
-    will not be alerted to any changes to the contents of an existing
-    dictionary, unless that dictionary value is re-assigned to the
-    HSTORE-attribute itself, thus generating a change event.
+            # in-place mutation, requires Mutable extension
+            # in order for the ORM to detect
+            my_object.data['some_key'] = 'some value'
+
+            session.commit()
+
+        When the :mod:`sqlalchemy.ext.mutable` extension is not used, the ORM
+        will not be alerted to any changes to the contents of an existing
+        dictionary, unless that dictionary value is re-assigned to the
+        HSTORE-attribute itself, thus generating a change event.
 
     .. seealso::
 
@@ -141,9 +106,7 @@ class HSTORE(sqltypes.Indexable, sqltypes.Concatenable, sqltypes.TypeEngine):
         """Construct a new :class:`.HSTORE`.
 
         :param text_type: the type that should be used for indexed values.
-         Defaults to :class:`.types.Text`.
-
-         .. versionadded:: 1.1.0
+         Defaults to :class:`_types.Text`.
 
         """
         if text_type is not None:
@@ -161,18 +124,19 @@ class HSTORE(sqltypes.Indexable, sqltypes.Concatenable, sqltypes.TypeEngine):
             return self.operate(HAS_KEY, other, result_type=sqltypes.Boolean)
 
         def has_all(self, other):
-            """Boolean expression.  Test for presence of all keys in jsonb
-            """
+            """Boolean expression.  Test for presence of all keys in jsonb"""
             return self.operate(HAS_ALL, other, result_type=sqltypes.Boolean)
 
         def has_any(self, other):
-            """Boolean expression.  Test for presence of any key in jsonb
-            """
+            """Boolean expression.  Test for presence of any key in jsonb"""
             return self.operate(HAS_ANY, other, result_type=sqltypes.Boolean)
 
         def contains(self, other, **kwargs):
             """Boolean expression.  Test if keys (or array) are a superset
             of/contained the keys of the argument jsonb expression.
+
+            kwargs may be ignored by this operator but are required for API
+            conformance.
             """
             return self.operate(CONTAINS, other, result_type=sqltypes.Boolean)
 
@@ -228,47 +192,22 @@ class HSTORE(sqltypes.Indexable, sqltypes.Concatenable, sqltypes.TypeEngine):
     comparator_factory = Comparator
 
     def bind_processor(self, dialect):
-        if util.py2k:
-            encoding = dialect.encoding
-
-            def process(value):
-                if isinstance(value, dict):
-                    return _serialize_hstore(value).encode(encoding)
-                else:
-                    return value
-
-        else:
-
-            def process(value):
-                if isinstance(value, dict):
-                    return _serialize_hstore(value)
-                else:
-                    return value
+        def process(value):
+            if isinstance(value, dict):
+                return _serialize_hstore(value)
+            else:
+                return value
 
         return process
 
     def result_processor(self, dialect, coltype):
-        if util.py2k:
-            encoding = dialect.encoding
-
-            def process(value):
-                if value is not None:
-                    return _parse_hstore(value.decode(encoding))
-                else:
-                    return value
-
-        else:
-
-            def process(value):
-                if value is not None:
-                    return _parse_hstore(value)
-                else:
-                    return value
+        def process(value):
+            if value is not None:
+                return _parse_hstore(value)
+            else:
+                return value
 
         return process
-
-
-ischema_names["hstore"] = HSTORE
 
 
 class hstore(sqlfunc.GenericFunction):
@@ -282,14 +221,14 @@ class hstore(sqlfunc.GenericFunction):
 
         from sqlalchemy.dialects.postgresql import array, hstore
 
-        select([hstore('key1', 'value1')])
+        select(hstore('key1', 'value1'))
 
-        select([
-                hstore(
-                    array(['key1', 'key2', 'key3']),
-                    array(['value1', 'value2', 'value3'])
-                )
-            ])
+        select(
+            hstore(
+                array(['key1', 'key2', 'key3']),
+                array(['value1', 'value2', 'value3'])
+            )
+        )
 
     .. seealso::
 
@@ -299,41 +238,49 @@ class hstore(sqlfunc.GenericFunction):
 
     type = HSTORE
     name = "hstore"
+    inherit_cache = True
 
 
 class _HStoreDefinedFunction(sqlfunc.GenericFunction):
     type = sqltypes.Boolean
     name = "defined"
+    inherit_cache = True
 
 
 class _HStoreDeleteFunction(sqlfunc.GenericFunction):
     type = HSTORE
     name = "delete"
+    inherit_cache = True
 
 
 class _HStoreSliceFunction(sqlfunc.GenericFunction):
     type = HSTORE
     name = "slice"
+    inherit_cache = True
 
 
 class _HStoreKeysFunction(sqlfunc.GenericFunction):
     type = ARRAY(sqltypes.Text)
     name = "akeys"
+    inherit_cache = True
 
 
 class _HStoreValsFunction(sqlfunc.GenericFunction):
     type = ARRAY(sqltypes.Text)
     name = "avals"
+    inherit_cache = True
 
 
 class _HStoreArrayFunction(sqlfunc.GenericFunction):
     type = ARRAY(sqltypes.Text)
     name = "hstore_to_array"
+    inherit_cache = True
 
 
 class _HStoreMatrixFunction(sqlfunc.GenericFunction):
     type = ARRAY(sqltypes.Text)
     name = "hstore_to_matrix"
+    inherit_cache = True
 
 
 #
@@ -438,7 +385,7 @@ def _serialize_hstore(val):
     def esc(s, position):
         if position == "value" and s is None:
             return "NULL"
-        elif isinstance(s, util.string_types):
+        elif isinstance(s, str):
             return '"%s"' % s.replace("\\", "\\\\").replace('"', r"\"")
         else:
             raise ValueError(

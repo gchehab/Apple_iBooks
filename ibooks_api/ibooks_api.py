@@ -10,8 +10,9 @@ import re
 from time import time
 from datetime import datetime
 
-import psutil
-from biplist import readPlist, writePlist, InvalidPlistException, NotBinaryPlistException
+import pypsutil as psutil
+#from biplist import readPlist, writePlist, InvalidPlistException, NotBinaryPlistException
+from plistlib import load, dump, FMT_BINARY
 from calibre_plugins.apple_ibooks.ibooks_api.ibooks_sql import BkLibraryDb, BkSeriesDb
 from pprint import pprint
 # from fsevents import Observer, Stream
@@ -31,7 +32,7 @@ class IbooksApi:
     catalog = {}
     IBOOKS_BKAGENT_PATH = path.dirname(prefs['bookcatalog'])
     IBOOKS_BKAGENT_CATALOG_FILE = prefs['bookcatalog']
-
+    
     @staticmethod
     def __file_as_bytes(file_to_read, size=None):
         with file_to_read:
@@ -83,6 +84,7 @@ class IbooksApi:
                 p = Popen(['ps', '-Au', str(getuid())], stdout=PIPE)
                 out, err = p.communicate()
                 for line in out.splitlines():
+                    print (type(line))
                     if 'Books.app' in line or 'BKAgentService' in line:
                         pid = int(split(r"\s+", line)[2])
                         if prefs['debug']:
@@ -131,13 +133,21 @@ class IbooksApi:
             self.__series_db = BkSeriesDb()
             self.has_changed = 0
             self.has_backup = False
-            self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
+            #self.catalog = readPlist(self.IBOOKS_BKAGENT_CATALOG_FILE)
+            self.catalog = None
+            with open(self.IBOOKS_BKAGENT_CATALOG_FILE, 'rb') as fp:
+                self.catalog = load(fp)
 
-        except (InvalidPlistException, NotBinaryPlistException), e:
-            if prefs['debug']:
-                print (str(datetime.now()) + ": " + self.IBOOKS_BKAGENT_CATALOG_FILE + "is not a valid plist file")
-            raise
+        # except InvalidPlistException:
+        #     if prefs['debug']:
+        #         print (str(datetime.now()) + ": " + self.IBOOKS_BKAGENT_CATALOG_FILE + "is not a valid plist file")
+        #     raise
 
+        # except NotBinaryPlistException:
+        #     if prefs['debug']:
+        #         print (str(datetime.now()) + ": " + self.IBOOKS_BKAGENT_CATALOG_FILE + "is not a valid plist file")
+        #     raise
+    
         except Exception:
             print (sys.exc_info()[0])
             raise
@@ -191,8 +201,12 @@ class IbooksApi:
                 self.__series_db.commit()
                 if prefs['debug']:
                     print (str(datetime.now()) + ": Commmiting plist catalog")
-                writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE + ".tmp", binary=False)
+                
+                #writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE + ".tmp", binary=False)
+                with open(self.IBOOKS_BKAGENT_CATALOG_FILE + ".tmp", 'wb') as fp:
+                    dump(self.catalog, fp, fmt=FMT_BINARY)
                 move(self.IBOOKS_BKAGENT_CATALOG_FILE + ".tmp", self.IBOOKS_BKAGENT_CATALOG_FILE)
+
                 if prefs['debug']:
                     print (str(datetime.now()) + ": Commmit finished")
                 self.has_changed = 0
@@ -275,9 +289,9 @@ class IbooksApi:
 
                     if series_name is not None:
                         # series_number *= 100
-                        adam_id = zlib.crc32(asset_id)
+                        adam_id = zlib.crc32(asset_id.encode('utf-8'))
                         adam_id = adam_id % (1<<32) if adam_id < 0 else adam_id
-                        series_adam_id = zlib.crc32(series_name)
+                        series_adam_id = zlib.crc32(series_name.encode('utf-8'))
                         series_adam_id = series_adam_id % (1 << 32) if series_adam_id < 0 else series_adam_id
 
                         sequence_display_name = str(series_number/100) \
@@ -400,18 +414,18 @@ class IbooksApi:
         count = len(self.catalog['Books'])
 
         if prefs['debug']:
-                    print str(datetime.now()) + ": Deletting all books from calibre"
+                    print (str(datetime.now()) + ": Deletting all books from calibre")
 
         for i in range(len(self.catalog['Books']) - 1, -1, -1):
             book = self.catalog['Books'][i]
 
             if 'comment' not in book:
                 if prefs['debug']:
-                    print str(datetime.now()) + ": Not deleting " + str(i) + ': Book not added by calibre, skipping'
+                    print (str(datetime.now()) + ": Not deleting " + str(i) + ': Book not added by calibre, skipping')
                 continue
 
             if prefs['debug']:
-                print str(datetime.now()) + ": Deleting " + str(i) + ": " + book['comment']
+                print (str(datetime.now()) + ": Deleting " + str(i) + ": " + book['comment'])
 
             if "Calibre #" in book['comment']:
                 file_path = book['path']
@@ -429,7 +443,7 @@ class IbooksApi:
                 if 'seriesAdamId' in book:
                     adam_id = book['itemId']
                     if prefs['debug']:
-                        print str(datetime.now()) + ": Removed " +str(adam_id) + " from series table"
+                        print (str(datetime.now()) + ": Removed " +str(adam_id) + " from series table")
                     self.__series_db.del_book_from_series(adam_id=adam_id)
 
                 del (self.catalog['Books'][i])
@@ -437,8 +451,8 @@ class IbooksApi:
                 deleted += 1
 
         if prefs['debug']:
-            print str(datetime.now()) + ": Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
-              str(len(self.catalog['Books'])) + " books"
+            print (str(datetime.now()) + ": Deleted " + str(deleted) + "/" + str(count) + " books from plist, kept " +\
+              str(len(self.catalog['Books'])) + " books")
         # if deleted > 0:
         #     writePlist(self.catalog, self.IBOOKS_BKAGENT_CATALOG_FILE)
 

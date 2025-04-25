@@ -43,6 +43,10 @@ The plugin does try to stop them once activated, however it has no way (as of ye
 during synchronization.  
       
 ## Building
+Requirements:
+``` shell
+make requirements
+```
 
 Debug:
 

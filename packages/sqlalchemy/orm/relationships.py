@@ -1,44 +1,89 @@
 # orm/relationships.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
 
 """Heuristics related to join conditions as used in
-:func:`.relationship`.
+:func:`_orm.relationship`.
 
 Provides the :class:`.JoinCondition` object, which encapsulates
 SQL annotation and aliasing behavior focused on the `primaryjoin`
-and `secondaryjoin` aspects of :func:`.relationship`.
+and `secondaryjoin` aspects of :func:`_orm.relationship`.
 
 """
-from __future__ import absolute_import
+from __future__ import annotations
 
 import collections
+from collections import abc
+import dataclasses
+import inspect as _py_inspect
+import itertools
+import re
+import typing
+from typing import Any
+from typing import Callable
+from typing import cast
+from typing import Collection
+from typing import Dict
+from typing import FrozenSet
+from typing import Generic
+from typing import Iterable
+from typing import Iterator
+from typing import List
+from typing import NamedTuple
+from typing import NoReturn
+from typing import Optional
+from typing import Sequence
+from typing import Set
+from typing import Tuple
+from typing import Type
+from typing import TypeVar
+from typing import Union
 import weakref
 
 from . import attributes
-from . import dependency
-from . import mapper as mapperlib
+from . import strategy_options
+from ._typing import insp_is_aliased_class
+from ._typing import is_has_collection_adapter
+from .base import _DeclarativeMapped
+from .base import _is_mapped_class
+from .base import class_mapper
+from .base import DynamicMapped
+from .base import LoaderCallableStatus
+from .base import PassiveFlag
 from .base import state_str
+from .base import WriteOnlyMapped
+from .interfaces import _AttributeOptions
+from .interfaces import _IntrospectsAnnotations
 from .interfaces import MANYTOMANY
 from .interfaces import MANYTOONE
 from .interfaces import ONETOMANY
 from .interfaces import PropComparator
+from .interfaces import RelationshipDirection
 from .interfaces import StrategizedProperty
 from .util import _orm_annotate
 from .util import _orm_deannotate
 from .util import CascadeOptions
 from .. import exc as sa_exc
+from .. import Exists
 from .. import log
 from .. import schema
 from .. import sql
 from .. import util
 from ..inspection import inspect
+from ..sql import coercions
 from ..sql import expression
 from ..sql import operators
+from ..sql import roles
 from ..sql import visitors
+from ..sql._typing import _ColumnExpressionArgument
+from ..sql._typing import _HasClauseElement
+from ..sql.annotation import _safe_annotate
+from ..sql.elements import ColumnClause
+from ..sql.elements import ColumnElement
+from ..sql.util import _deep_annotate
 from ..sql.util import _deep_deannotate
 from ..sql.util import _shallow_annotate
 from ..sql.util import adapt_criterion_to_null
@@ -46,9 +91,123 @@ from ..sql.util import ClauseAdapter
 from ..sql.util import join_condition
 from ..sql.util import selectables_overlap
 from ..sql.util import visit_binary_product
+from ..util.typing import de_optionalize_union_types
+from ..util.typing import Literal
+from ..util.typing import resolve_name_to_real_class_name
+
+if typing.TYPE_CHECKING:
+    from ._typing import _EntityType
+    from ._typing import _ExternalEntityType
+    from ._typing import _IdentityKeyType
+    from ._typing import _InstanceDict
+    from ._typing import _InternalEntityType
+    from ._typing import _O
+    from ._typing import _RegistryType
+    from .base import Mapped
+    from .clsregistry import _class_resolver
+    from .clsregistry import _ModNS
+    from .decl_base import _ClassScanMapperConfig
+    from .dependency import DependencyProcessor
+    from .mapper import Mapper
+    from .query import Query
+    from .session import Session
+    from .state import InstanceState
+    from .strategies import LazyLoader
+    from .util import AliasedClass
+    from .util import AliasedInsp
+    from ..sql._typing import _CoreAdapterProto
+    from ..sql._typing import _EquivalentColumnMap
+    from ..sql._typing import _InfoType
+    from ..sql.annotation import _AnnotationDict
+    from ..sql.annotation import SupportsAnnotations
+    from ..sql.elements import BinaryExpression
+    from ..sql.elements import BindParameter
+    from ..sql.elements import ClauseElement
+    from ..sql.schema import Table
+    from ..sql.selectable import FromClause
+    from ..util.typing import _AnnotationScanType
+    from ..util.typing import RODescriptorReference
+
+_T = TypeVar("_T", bound=Any)
+_T1 = TypeVar("_T1", bound=Any)
+_T2 = TypeVar("_T2", bound=Any)
+
+_PT = TypeVar("_PT", bound=Any)
+
+_PT2 = TypeVar("_PT2", bound=Any)
 
 
-def remote(expr):
+_RelationshipArgumentType = Union[
+    str,
+    Type[_T],
+    Callable[[], Type[_T]],
+    "Mapper[_T]",
+    "AliasedClass[_T]",
+    Callable[[], "Mapper[_T]"],
+    Callable[[], "AliasedClass[_T]"],
+]
+
+_LazyLoadArgumentType = Literal[
+    "select",
+    "joined",
+    "selectin",
+    "subquery",
+    "raise",
+    "raise_on_sql",
+    "noload",
+    "immediate",
+    "write_only",
+    "dynamic",
+    True,
+    False,
+    None,
+]
+
+
+_RelationshipJoinConditionArgument = Union[
+    str, _ColumnExpressionArgument[bool]
+]
+_RelationshipSecondaryArgument = Union[
+    "FromClause", str, Callable[[], "FromClause"]
+]
+_ORMOrderByArgument = Union[
+    Literal[False],
+    str,
+    _ColumnExpressionArgument[Any],
+    Callable[[], _ColumnExpressionArgument[Any]],
+    Callable[[], Iterable[_ColumnExpressionArgument[Any]]],
+    Iterable[Union[str, _ColumnExpressionArgument[Any]]],
+]
+ORMBackrefArgument = Union[str, Tuple[str, Dict[str, Any]]]
+
+_ORMColCollectionElement = Union[
+    ColumnClause[Any],
+    _HasClauseElement[Any],
+    roles.DMLColumnRole,
+    "Mapped[Any]",
+]
+_ORMColCollectionArgument = Union[
+    str,
+    Sequence[_ORMColCollectionElement],
+    Callable[[], Sequence[_ORMColCollectionElement]],
+    Callable[[], _ORMColCollectionElement],
+    _ORMColCollectionElement,
+]
+
+
+_CEA = TypeVar("_CEA", bound=_ColumnExpressionArgument[Any])
+
+_CE = TypeVar("_CE", bound="ColumnElement[Any]")
+
+
+_ColumnPairIterable = Iterable[Tuple[ColumnElement[Any], ColumnElement[Any]]]
+
+_ColumnPairs = Sequence[Tuple[ColumnElement[Any], ColumnElement[Any]]]
+
+_MutableColumnPairs = List[Tuple[ColumnElement[Any], ColumnElement[Any]]]
+
+
+def remote(expr: _CEA) -> _CEA:
     """Annotate a portion of a primaryjoin expression
     with a 'remote' annotation.
 
@@ -62,12 +221,12 @@ def remote(expr):
         :func:`.foreign`
 
     """
-    return _annotate_columns(
-        expression._clause_element_as_expr(expr), {"remote": True}
+    return _annotate_columns(  # type: ignore
+        coercions.expect(roles.ColumnArgumentRole, expr), {"remote": True}
     )
 
 
-def foreign(expr):
+def foreign(expr: _CEA) -> _CEA:
     """Annotate a portion of a primaryjoin expression
     with a 'foreign' annotation.
 
@@ -82,18 +241,79 @@ def foreign(expr):
 
     """
 
-    return _annotate_columns(
-        expression._clause_element_as_expr(expr), {"foreign": True}
+    return _annotate_columns(  # type: ignore
+        coercions.expect(roles.ColumnArgumentRole, expr), {"foreign": True}
     )
 
 
+@dataclasses.dataclass
+class _RelationshipArg(Generic[_T1, _T2]):
+    """stores a user-defined parameter value that must be resolved and
+    parsed later at mapper configuration time.
+
+    """
+
+    __slots__ = "name", "argument", "resolved"
+    name: str
+    argument: _T1
+    resolved: Optional[_T2]
+
+    def _is_populated(self) -> bool:
+        return self.argument is not None
+
+    def _resolve_against_registry(
+        self, clsregistry_resolver: Callable[[str, bool], _class_resolver]
+    ) -> None:
+        attr_value = self.argument
+
+        if isinstance(attr_value, str):
+            self.resolved = clsregistry_resolver(
+                attr_value, self.name == "secondary"
+            )()
+        elif callable(attr_value) and not _is_mapped_class(attr_value):
+            self.resolved = attr_value()
+        else:
+            self.resolved = attr_value
+
+
+_RelationshipOrderByArg = Union[Literal[False], Tuple[ColumnElement[Any], ...]]
+
+
+class _RelationshipArgs(NamedTuple):
+    """stores user-passed parameters that are resolved at mapper configuration
+    time.
+
+    """
+
+    secondary: _RelationshipArg[
+        Optional[_RelationshipSecondaryArgument],
+        Optional[FromClause],
+    ]
+    primaryjoin: _RelationshipArg[
+        Optional[_RelationshipJoinConditionArgument],
+        Optional[ColumnElement[Any]],
+    ]
+    secondaryjoin: _RelationshipArg[
+        Optional[_RelationshipJoinConditionArgument],
+        Optional[ColumnElement[Any]],
+    ]
+    order_by: _RelationshipArg[_ORMOrderByArgument, _RelationshipOrderByArg]
+    foreign_keys: _RelationshipArg[
+        Optional[_ORMColCollectionArgument], Set[ColumnElement[Any]]
+    ]
+    remote_side: _RelationshipArg[
+        Optional[_ORMColCollectionArgument], Set[ColumnElement[Any]]
+    ]
+
+
 @log.class_logger
-@util.langhelpers.dependency_for("sqlalchemy.orm.properties", add_to_all=True)
-class RelationshipProperty(StrategizedProperty):
+class RelationshipProperty(
+    _IntrospectsAnnotations, StrategizedProperty[_T], log.Identified
+):
     """Describes an object property that holds a single item or list
     of items that correspond to a related database table.
 
-    Public constructor is the :func:`.orm.relationship` function.
+    Public constructor is the :func:`_orm.relationship` function.
 
     .. seealso::
 
@@ -101,789 +321,173 @@ class RelationshipProperty(StrategizedProperty):
 
     """
 
-    strategy_wildcard_key = "relationship"
+    strategy_wildcard_key = strategy_options._RELATIONSHIP_TOKEN
+    inherit_cache = True
+    """:meta private:"""
 
-    _dependency_processor = None
+    _links_to_entity = True
+    _is_relationship = True
 
-    @util.deprecated_params(
-        extension=(
-            "0.7",
-            ":class:`.AttributeExtension` is deprecated in favor of the "
-            ":class:`.AttributeEvents` listener interface.  The "
-            ":paramref:`.relationship.extension` parameter will be "
-            "removed in a future release.",
-        )
-    )
-    def __init__(
-        self,
-        argument,
-        secondary=None,
-        primaryjoin=None,
-        secondaryjoin=None,
-        foreign_keys=None,
-        uselist=None,
-        order_by=False,
-        backref=None,
-        back_populates=None,
-        post_update=False,
-        cascade=False,
-        extension=None,
-        viewonly=False,
-        lazy="select",
-        collection_class=None,
+    _overlaps: Sequence[str]
+
+    _lazy_strategy: LazyLoader
+
+    _persistence_only = dict(
         passive_deletes=False,
         passive_updates=True,
-        remote_side=None,
         enable_typechecks=True,
-        join_depth=None,
-        comparator_factory=None,
-        single_parent=False,
-        innerjoin=False,
-        distinct_target_key=None,
-        doc=None,
         active_history=False,
-        cascade_backrefs=True,
-        load_on_pending=False,
-        bake_queries=True,
-        _local_remote_pairs=None,
-        query_class=None,
-        info=None,
-        omit_join=None,
+        cascade_backrefs=False,
+    )
+
+    _dependency_processor: Optional[DependencyProcessor] = None
+
+    primaryjoin: ColumnElement[bool]
+    secondaryjoin: Optional[ColumnElement[bool]]
+    secondary: Optional[FromClause]
+    _join_condition: JoinCondition
+    order_by: _RelationshipOrderByArg
+
+    _user_defined_foreign_keys: Set[ColumnElement[Any]]
+    _calculated_foreign_keys: Set[ColumnElement[Any]]
+
+    remote_side: Set[ColumnElement[Any]]
+    local_columns: Set[ColumnElement[Any]]
+
+    synchronize_pairs: _ColumnPairs
+    secondary_synchronize_pairs: Optional[_ColumnPairs]
+
+    local_remote_pairs: Optional[_ColumnPairs]
+
+    direction: RelationshipDirection
+
+    _init_args: _RelationshipArgs
+
+    def __init__(
+        self,
+        argument: Optional[_RelationshipArgumentType[_T]] = None,
+        secondary: Optional[_RelationshipSecondaryArgument] = None,
+        *,
+        uselist: Optional[bool] = None,
+        collection_class: Optional[
+            Union[Type[Collection[Any]], Callable[[], Collection[Any]]]
+        ] = None,
+        primaryjoin: Optional[_RelationshipJoinConditionArgument] = None,
+        secondaryjoin: Optional[_RelationshipJoinConditionArgument] = None,
+        back_populates: Optional[str] = None,
+        order_by: _ORMOrderByArgument = False,
+        backref: Optional[ORMBackrefArgument] = None,
+        overlaps: Optional[str] = None,
+        post_update: bool = False,
+        cascade: str = "save-update, merge",
+        viewonly: bool = False,
+        attribute_options: Optional[_AttributeOptions] = None,
+        lazy: _LazyLoadArgumentType = "select",
+        passive_deletes: Union[Literal["all"], bool] = False,
+        passive_updates: bool = True,
+        active_history: bool = False,
+        enable_typechecks: bool = True,
+        foreign_keys: Optional[_ORMColCollectionArgument] = None,
+        remote_side: Optional[_ORMColCollectionArgument] = None,
+        join_depth: Optional[int] = None,
+        comparator_factory: Optional[
+            Type[RelationshipProperty.Comparator[Any]]
+        ] = None,
+        single_parent: bool = False,
+        innerjoin: bool = False,
+        distinct_target_key: Optional[bool] = None,
+        load_on_pending: bool = False,
+        query_class: Optional[Type[Query[Any]]] = None,
+        info: Optional[_InfoType] = None,
+        omit_join: Literal[None, False] = None,
+        sync_backref: Optional[bool] = None,
+        doc: Optional[str] = None,
+        bake_queries: Literal[True] = True,
+        cascade_backrefs: Literal[False] = False,
+        _local_remote_pairs: Optional[_ColumnPairs] = None,
+        _legacy_inactive_history_style: bool = False,
     ):
-        """Provide a relationship between two mapped classes.
-
-        This corresponds to a parent-child or associative table relationship.
-        The constructed class is an instance of
-        :class:`.RelationshipProperty`.
-
-        A typical :func:`.relationship`, used in a classical mapping::
-
-           mapper(Parent, properties={
-             'children': relationship(Child)
-           })
-
-        Some arguments accepted by :func:`.relationship` optionally accept a
-        callable function, which when called produces the desired value.
-        The callable is invoked by the parent :class:`.Mapper` at "mapper
-        initialization" time, which happens only when mappers are first used,
-        and is assumed to be after all mappings have been constructed.  This
-        can be used to resolve order-of-declaration and other dependency
-        issues, such as if ``Child`` is declared below ``Parent`` in the same
-        file::
-
-            mapper(Parent, properties={
-                "children":relationship(lambda: Child,
-                                    order_by=lambda: Child.id)
-            })
-
-        When using the :ref:`declarative_toplevel` extension, the Declarative
-        initializer allows string arguments to be passed to
-        :func:`.relationship`.  These string arguments are converted into
-        callables that evaluate the string as Python code, using the
-        Declarative class-registry as a namespace.  This allows the lookup of
-        related classes to be automatic via their string name, and removes the
-        need for related classes to be imported into the local module space
-        before the dependent classes have been declared.  It is still required
-        that the modules in which these related classes appear are imported
-        anywhere in the application at some point before the related mappings
-        are actually used, else a lookup error will be raised when the
-        :func:`.relationship` attempts to resolve the string reference to the
-        related class.    An example of a string- resolved class is as
-        follows::
-
-            from sqlalchemy.ext.declarative import declarative_base
-
-            Base = declarative_base()
-
-            class Parent(Base):
-                __tablename__ = 'parent'
-                id = Column(Integer, primary_key=True)
-                children = relationship("Child", order_by="Child.id")
-
-        .. seealso::
-
-          :ref:`relationship_config_toplevel` - Full introductory and
-          reference documentation for :func:`.relationship`.
-
-          :ref:`orm_tutorial_relationship` - ORM tutorial introduction.
-
-        :param argument:
-          a mapped class, or actual :class:`.Mapper` instance, representing
-          the target of the relationship.
-
-          :paramref:`~.relationship.argument` may also be passed as a callable
-          function which is evaluated at mapper initialization time, and may
-          be passed as a Python-evaluable string when using Declarative.
-
-          .. seealso::
-
-            :ref:`declarative_configuring_relationships` - further detail
-            on relationship configuration when using Declarative.
-
-        :param secondary:
-          for a many-to-many relationship, specifies the intermediary
-          table, and is typically an instance of :class:`.Table`.
-          In less common circumstances, the argument may also be specified
-          as an :class:`.Alias` construct, or even a :class:`.Join` construct.
-
-          :paramref:`~.relationship.secondary` may
-          also be passed as a callable function which is evaluated at
-          mapper initialization time.  When using Declarative, it may also
-          be a string argument noting the name of a :class:`.Table` that is
-          present in the :class:`.MetaData` collection associated with the
-          parent-mapped :class:`.Table`.
-
-          The :paramref:`~.relationship.secondary` keyword argument is
-          typically applied in the case where the intermediary :class:`.Table`
-          is not otherwise expressed in any direct class mapping. If the
-          "secondary" table is also explicitly mapped elsewhere (e.g. as in
-          :ref:`association_pattern`), one should consider applying the
-          :paramref:`~.relationship.viewonly` flag so that this
-          :func:`.relationship` is not used for persistence operations which
-          may conflict with those of the association object pattern.
-
-          .. seealso::
-
-              :ref:`relationships_many_to_many` - Reference example of "many
-              to many".
-
-              :ref:`orm_tutorial_many_to_many` - ORM tutorial introduction to
-              many-to-many relationships.
-
-              :ref:`self_referential_many_to_many` - Specifics on using
-              many-to-many in a self-referential case.
-
-              :ref:`declarative_many_to_many` - Additional options when using
-              Declarative.
-
-              :ref:`association_pattern` - an alternative to
-              :paramref:`~.relationship.secondary` when composing association
-              table relationships, allowing additional attributes to be
-              specified on the association table.
-
-              :ref:`composite_secondary_join` - a lesser-used pattern which
-              in some cases can enable complex :func:`.relationship` SQL
-              conditions to be used.
-
-          .. versionadded:: 0.9.2 :paramref:`~.relationship.secondary` works
-             more effectively when referring to a :class:`.Join` instance.
-
-        :param active_history=False:
-          When ``True``, indicates that the "previous" value for a
-          many-to-one reference should be loaded when replaced, if
-          not already loaded. Normally, history tracking logic for
-          simple many-to-ones only needs to be aware of the "new"
-          value in order to perform a flush. This flag is available
-          for applications that make use of
-          :func:`.attributes.get_history` which also need to know
-          the "previous" value of the attribute.
-
-        :param backref:
-          indicates the string name of a property to be placed on the related
-          mapper's class that will handle this relationship in the other
-          direction. The other property will be created automatically
-          when the mappers are configured.  Can also be passed as a
-          :func:`.backref` object to control the configuration of the
-          new relationship.
-
-          .. seealso::
-
-            :ref:`relationships_backref` - Introductory documentation and
-            examples.
-
-            :paramref:`~.relationship.back_populates` - alternative form
-            of backref specification.
-
-            :func:`.backref` - allows control over :func:`.relationship`
-            configuration when using :paramref:`~.relationship.backref`.
-
-
-        :param back_populates:
-          Takes a string name and has the same meaning as
-          :paramref:`~.relationship.backref`, except the complementing
-          property is **not** created automatically, and instead must be
-          configured explicitly on the other mapper.  The complementing
-          property should also indicate
-          :paramref:`~.relationship.back_populates` to this relationship to
-          ensure proper functioning.
-
-          .. seealso::
-
-            :ref:`relationships_backref` - Introductory documentation and
-            examples.
-
-            :paramref:`~.relationship.backref` - alternative form
-            of backref specification.
-
-        :param bake_queries=True:
-          Use the :class:`.BakedQuery` cache to cache the construction of SQL
-          used in lazy loads.  True by default.   Set to False if the
-          join condition of the relationship has unusual features that
-          might not respond well to statement caching.
-
-          .. versionchanged:: 1.2
-             "Baked" loading is the default implementation for the "select",
-             a.k.a. "lazy" loading strategy for relationships.
-
-          .. versionadded:: 1.0.0
-
-          .. seealso::
-
-            :ref:`baked_toplevel`
-
-        :param cascade:
-          a comma-separated list of cascade rules which determines how
-          Session operations should be "cascaded" from parent to child.
-          This defaults to ``False``, which means the default cascade
-          should be used - this default cascade is ``"save-update, merge"``.
-
-          The available cascades are ``save-update``, ``merge``,
-          ``expunge``, ``delete``, ``delete-orphan``, and ``refresh-expire``.
-          An additional option, ``all`` indicates shorthand for
-          ``"save-update, merge, refresh-expire,
-          expunge, delete"``, and is often used as in ``"all, delete-orphan"``
-          to indicate that related objects should follow along with the
-          parent object in all cases, and be deleted when de-associated.
-
-          .. seealso::
-
-            :ref:`unitofwork_cascades` - Full detail on each of the available
-            cascade options.
-
-            :ref:`tutorial_delete_cascade` - Tutorial example describing
-            a delete cascade.
-
-        :param cascade_backrefs=True:
-          a boolean value indicating if the ``save-update`` cascade should
-          operate along an assignment event intercepted by a backref.
-          When set to ``False``, the attribute managed by this relationship
-          will not cascade an incoming transient object into the session of a
-          persistent parent, if the event is received via backref.
-
-          .. seealso::
-
-            :ref:`backref_cascade` - Full discussion and examples on how
-            the :paramref:`~.relationship.cascade_backrefs` option is used.
-
-        :param collection_class:
-          a class or callable that returns a new list-holding object. will
-          be used in place of a plain list for storing elements.
-
-          .. seealso::
-
-            :ref:`custom_collections` - Introductory documentation and
-            examples.
-
-        :param comparator_factory:
-          a class which extends :class:`.RelationshipProperty.Comparator`
-          which provides custom SQL clause generation for comparison
-          operations.
-
-          .. seealso::
-
-            :class:`.PropComparator` - some detail on redefining comparators
-            at this level.
-
-            :ref:`custom_comparators` - Brief intro to this feature.
-
-
-        :param distinct_target_key=None:
-          Indicate if a "subquery" eager load should apply the DISTINCT
-          keyword to the innermost SELECT statement.  When left as ``None``,
-          the DISTINCT keyword will be applied in those cases when the target
-          columns do not comprise the full primary key of the target table.
-          When set to ``True``, the DISTINCT keyword is applied to the
-          innermost SELECT unconditionally.
-
-          It may be desirable to set this flag to False when the DISTINCT is
-          reducing performance of the innermost subquery beyond that of what
-          duplicate innermost rows may be causing.
-
-          .. versionchanged:: 0.9.0 -
-             :paramref:`~.relationship.distinct_target_key` now defaults to
-             ``None``, so that the feature enables itself automatically for
-             those cases where the innermost query targets a non-unique
-             key.
-
-          .. seealso::
-
-            :ref:`loading_toplevel` - includes an introduction to subquery
-            eager loading.
-
-        :param doc:
-          docstring which will be applied to the resulting descriptor.
-
-        :param extension:
-          an :class:`.AttributeExtension` instance, or list of extensions,
-          which will be prepended to the list of attribute listeners for
-          the resulting descriptor placed on the class.
-
-        :param foreign_keys:
-
-          a list of columns which are to be used as "foreign key"
-          columns, or columns which refer to the value in a remote
-          column, within the context of this :func:`.relationship`
-          object's :paramref:`~.relationship.primaryjoin` condition.
-          That is, if the :paramref:`~.relationship.primaryjoin`
-          condition of this :func:`.relationship` is ``a.id ==
-          b.a_id``, and the values in ``b.a_id`` are required to be
-          present in ``a.id``, then the "foreign key" column of this
-          :func:`.relationship` is ``b.a_id``.
-
-          In normal cases, the :paramref:`~.relationship.foreign_keys`
-          parameter is **not required.** :func:`.relationship` will
-          automatically determine which columns in the
-          :paramref:`~.relationship.primaryjoin` condition are to be
-          considered "foreign key" columns based on those
-          :class:`.Column` objects that specify :class:`.ForeignKey`,
-          or are otherwise listed as referencing columns in a
-          :class:`.ForeignKeyConstraint` construct.
-          :paramref:`~.relationship.foreign_keys` is only needed when:
-
-            1. There is more than one way to construct a join from the local
-               table to the remote table, as there are multiple foreign key
-               references present.  Setting ``foreign_keys`` will limit the
-               :func:`.relationship` to consider just those columns specified
-               here as "foreign".
-
-            2. The :class:`.Table` being mapped does not actually have
-               :class:`.ForeignKey` or :class:`.ForeignKeyConstraint`
-               constructs present, often because the table
-               was reflected from a database that does not support foreign key
-               reflection (MySQL MyISAM).
-
-            3. The :paramref:`~.relationship.primaryjoin` argument is used to
-               construct a non-standard join condition, which makes use of
-               columns or expressions that do not normally refer to their
-               "parent" column, such as a join condition expressed by a
-               complex comparison using a SQL function.
-
-          The :func:`.relationship` construct will raise informative
-          error messages that suggest the use of the
-          :paramref:`~.relationship.foreign_keys` parameter when
-          presented with an ambiguous condition.   In typical cases,
-          if :func:`.relationship` doesn't raise any exceptions, the
-          :paramref:`~.relationship.foreign_keys` parameter is usually
-          not needed.
-
-          :paramref:`~.relationship.foreign_keys` may also be passed as a
-          callable function which is evaluated at mapper initialization time,
-          and may be passed as a Python-evaluable string when using
-          Declarative.
-
-          .. seealso::
-
-            :ref:`relationship_foreign_keys`
-
-            :ref:`relationship_custom_foreign`
-
-            :func:`.foreign` - allows direct annotation of the "foreign"
-            columns within a :paramref:`~.relationship.primaryjoin` condition.
-
-        :param info: Optional data dictionary which will be populated into the
-            :attr:`.MapperProperty.info` attribute of this object.
-
-        :param innerjoin=False:
-          when ``True``, joined eager loads will use an inner join to join
-          against related tables instead of an outer join.  The purpose
-          of this option is generally one of performance, as inner joins
-          generally perform better than outer joins.
-
-          This flag can be set to ``True`` when the relationship references an
-          object via many-to-one using local foreign keys that are not
-          nullable, or when the reference is one-to-one or a collection that
-          is guaranteed to have one or at least one entry.
-
-          The option supports the same "nested" and "unnested" options as
-          that of :paramref:`.joinedload.innerjoin`.  See that flag
-          for details on nested / unnested behaviors.
-
-          .. seealso::
-
-            :paramref:`.joinedload.innerjoin` - the option as specified by
-            loader option, including detail on nesting behavior.
-
-            :ref:`what_kind_of_loading` - Discussion of some details of
-            various loader options.
-
-
-        :param join_depth:
-          when non-``None``, an integer value indicating how many levels
-          deep "eager" loaders should join on a self-referring or cyclical
-          relationship.  The number counts how many times the same Mapper
-          shall be present in the loading condition along a particular join
-          branch.  When left at its default of ``None``, eager loaders
-          will stop chaining when they encounter a the same target mapper
-          which is already higher up in the chain.  This option applies
-          both to joined- and subquery- eager loaders.
-
-          .. seealso::
-
-            :ref:`self_referential_eager_loading` - Introductory documentation
-            and examples.
-
-        :param lazy='select': specifies
-          how the related items should be loaded.  Default value is
-          ``select``.  Values include:
-
-          * ``select`` - items should be loaded lazily when the property is
-            first accessed, using a separate SELECT statement, or identity map
-            fetch for simple many-to-one references.
-
-          * ``immediate`` - items should be loaded as the parents are loaded,
-            using a separate SELECT statement, or identity map fetch for
-            simple many-to-one references.
-
-          * ``joined`` - items should be loaded "eagerly" in the same query as
-            that of the parent, using a JOIN or LEFT OUTER JOIN.  Whether
-            the join is "outer" or not is determined by the
-            :paramref:`~.relationship.innerjoin` parameter.
-
-          * ``subquery`` - items should be loaded "eagerly" as the parents are
-            loaded, using one additional SQL statement, which issues a JOIN to
-            a subquery of the original statement, for each collection
-            requested.
-
-          * ``selectin`` - items should be loaded "eagerly" as the parents
-            are loaded, using one or more additional SQL statements, which
-            issues a JOIN to the immediate parent object, specifying primary
-            key identifiers using an IN clause.
-
-            .. versionadded:: 1.2
-
-          * ``noload`` - no loading should occur at any time.  This is to
-            support "write-only" attributes, or attributes which are
-            populated in some manner specific to the application.
-
-          * ``raise`` - lazy loading is disallowed; accessing
-            the attribute, if its value were not already loaded via eager
-            loading, will raise an :exc:`~sqlalchemy.exc.InvalidRequestError`.
-            This strategy can be used when objects are to be detached from
-            their attached :class:`.Session` after they are loaded.
-
-            .. versionadded:: 1.1
-
-          * ``raise_on_sql`` - lazy loading that emits SQL is disallowed;
-            accessing the attribute, if its value were not already loaded via
-            eager loading, will raise an
-            :exc:`~sqlalchemy.exc.InvalidRequestError`, **if the lazy load
-            needs to emit SQL**.  If the lazy load can pull the related value
-            from the identity map or determine that it should be None, the
-            value is loaded.  This strategy can be used when objects will
-            remain associated with the attached :class:`.Session`, however
-            additional SELECT statements should be blocked.
-
-            .. versionadded:: 1.1
-
-          * ``dynamic`` - the attribute will return a pre-configured
-            :class:`.Query` object for all read
-            operations, onto which further filtering operations can be
-            applied before iterating the results.  See
-            the section :ref:`dynamic_relationship` for more details.
-
-          * True - a synonym for 'select'
-
-          * False - a synonym for 'joined'
-
-          * None - a synonym for 'noload'
-
-          .. seealso::
-
-            :doc:`/orm/loading_relationships` - Full documentation on
-            relationship loader configuration.
-
-            :ref:`dynamic_relationship` - detail on the ``dynamic`` option.
-
-            :ref:`collections_noload_raiseload` - notes on "noload" and "raise"
-
-        :param load_on_pending=False:
-          Indicates loading behavior for transient or pending parent objects.
-
-          When set to ``True``, causes the lazy-loader to
-          issue a query for a parent object that is not persistent, meaning it
-          has never been flushed.  This may take effect for a pending object
-          when autoflush is disabled, or for a transient object that has been
-          "attached" to a :class:`.Session` but is not part of its pending
-          collection.
-
-          The :paramref:`~.relationship.load_on_pending` flag does not improve
-          behavior when the ORM is used normally - object references should be
-          constructed at the object level, not at the foreign key level, so
-          that they are present in an ordinary way before a flush proceeds.
-          This flag is not not intended for general use.
-
-          .. seealso::
-
-              :meth:`.Session.enable_relationship_loading` - this method
-              establishes "load on pending" behavior for the whole object, and
-              also allows loading on objects that remain transient or
-              detached.
-
-        :param order_by:
-          indicates the ordering that should be applied when loading these
-          items.  :paramref:`~.relationship.order_by` is expected to refer to
-          one of the :class:`.Column` objects to which the target class is
-          mapped, or the attribute itself bound to the target class which
-          refers to the column.
-
-          :paramref:`~.relationship.order_by` may also be passed as a callable
-          function which is evaluated at mapper initialization time, and may
-          be passed as a Python-evaluable string when using Declarative.
-
-        :param passive_deletes=False:
-           Indicates loading behavior during delete operations.
-
-           A value of True indicates that unloaded child items should not
-           be loaded during a delete operation on the parent.  Normally,
-           when a parent item is deleted, all child items are loaded so
-           that they can either be marked as deleted, or have their
-           foreign key to the parent set to NULL.  Marking this flag as
-           True usually implies an ON DELETE <CASCADE|SET NULL> rule is in
-           place which will handle updating/deleting child rows on the
-           database side.
-
-           Additionally, setting the flag to the string value 'all' will
-           disable the "nulling out" of the child foreign keys, when the parent
-           object is deleted and there is no delete or delete-orphan cascade
-           enabled.  This is typically used when a triggering or error raise
-           scenario is in place on the database side.  Note that the foreign
-           key attributes on in-session child objects will not be changed after
-           a flush occurs so this is a very special use-case setting.
-           Additionally, the "nulling out" will still occur if the child
-           object is de-associated with the parent.
-
-           .. seealso::
-
-                :ref:`passive_deletes` - Introductory documentation
-                and examples.
-
-        :param passive_updates=True:
-          Indicates the persistence behavior to take when a referenced
-          primary key value changes in place, indicating that the referencing
-          foreign key columns will also need their value changed.
-
-          When True, it is assumed that ``ON UPDATE CASCADE`` is configured on
-          the foreign key in the database, and that the database will
-          handle propagation of an UPDATE from a source column to
-          dependent rows.  When False, the SQLAlchemy :func:`.relationship`
-          construct will attempt to emit its own UPDATE statements to
-          modify related targets.  However note that SQLAlchemy **cannot**
-          emit an UPDATE for more than one level of cascade.  Also,
-          setting this flag to False is not compatible in the case where
-          the database is in fact enforcing referential integrity, unless
-          those constraints are explicitly "deferred", if the target backend
-          supports it.
-
-          It is highly advised that an application which is employing
-          mutable primary keys keeps ``passive_updates`` set to True,
-          and instead uses the referential integrity features of the database
-          itself in order to handle the change efficiently and fully.
-
-          .. seealso::
-
-              :ref:`passive_updates` - Introductory documentation and
-              examples.
-
-              :paramref:`.mapper.passive_updates` - a similar flag which
-              takes effect for joined-table inheritance mappings.
-
-        :param post_update:
-          this indicates that the relationship should be handled by a
-          second UPDATE statement after an INSERT or before a
-          DELETE. Currently, it also will issue an UPDATE after the
-          instance was UPDATEd as well, although this technically should
-          be improved. This flag is used to handle saving bi-directional
-          dependencies between two individual rows (i.e. each row
-          references the other), where it would otherwise be impossible to
-          INSERT or DELETE both rows fully since one row exists before the
-          other. Use this flag when a particular mapping arrangement will
-          incur two rows that are dependent on each other, such as a table
-          that has a one-to-many relationship to a set of child rows, and
-          also has a column that references a single child row within that
-          list (i.e. both tables contain a foreign key to each other). If
-          a flush operation returns an error that a "cyclical
-          dependency" was detected, this is a cue that you might want to
-          use :paramref:`~.relationship.post_update` to "break" the cycle.
-
-          .. seealso::
-
-              :ref:`post_update` - Introductory documentation and examples.
-
-        :param primaryjoin:
-          a SQL expression that will be used as the primary
-          join of the child object against the parent object, or in a
-          many-to-many relationship the join of the parent object to the
-          association table. By default, this value is computed based on the
-          foreign key relationships of the parent and child tables (or
-          association table).
-
-          :paramref:`~.relationship.primaryjoin` may also be passed as a
-          callable function which is evaluated at mapper initialization time,
-          and may be passed as a Python-evaluable string when using
-          Declarative.
-
-          .. seealso::
-
-              :ref:`relationship_primaryjoin`
-
-        :param remote_side:
-          used for self-referential relationships, indicates the column or
-          list of columns that form the "remote side" of the relationship.
-
-          :paramref:`.relationship.remote_side` may also be passed as a
-          callable function which is evaluated at mapper initialization time,
-          and may be passed as a Python-evaluable string when using
-          Declarative.
-
-          .. seealso::
-
-            :ref:`self_referential` - in-depth explanation of how
-            :paramref:`~.relationship.remote_side`
-            is used to configure self-referential relationships.
-
-            :func:`.remote` - an annotation function that accomplishes the
-            same purpose as :paramref:`~.relationship.remote_side`, typically
-            when a custom :paramref:`~.relationship.primaryjoin` condition
-            is used.
-
-        :param query_class:
-          a :class:`.Query` subclass that will be used as the base of the
-          "appender query" returned by a "dynamic" relationship, that
-          is, a relationship that specifies ``lazy="dynamic"`` or was
-          otherwise constructed using the :func:`.orm.dynamic_loader`
-          function.
-
-          .. seealso::
-
-            :ref:`dynamic_relationship` - Introduction to "dynamic"
-            relationship loaders.
-
-        :param secondaryjoin:
-          a SQL expression that will be used as the join of
-          an association table to the child object. By default, this value is
-          computed based on the foreign key relationships of the association
-          and child tables.
-
-          :paramref:`~.relationship.secondaryjoin` may also be passed as a
-          callable function which is evaluated at mapper initialization time,
-          and may be passed as a Python-evaluable string when using
-          Declarative.
-
-          .. seealso::
-
-              :ref:`relationship_primaryjoin`
-
-        :param single_parent:
-          when True, installs a validator which will prevent objects
-          from being associated with more than one parent at a time.
-          This is used for many-to-one or many-to-many relationships that
-          should be treated either as one-to-one or one-to-many.  Its usage
-          is optional, except for :func:`.relationship` constructs which
-          are many-to-one or many-to-many and also
-          specify the ``delete-orphan`` cascade option.  The
-          :func:`.relationship` construct itself will raise an error
-          instructing when this option is required.
-
-          .. seealso::
-
-            :ref:`unitofwork_cascades` - includes detail on when the
-            :paramref:`~.relationship.single_parent` flag may be appropriate.
-
-        :param uselist:
-          a boolean that indicates if this property should be loaded as a
-          list or a scalar. In most cases, this value is determined
-          automatically by :func:`.relationship` at mapper configuration
-          time, based on the type and direction
-          of the relationship - one to many forms a list, many to one
-          forms a scalar, many to many is a list. If a scalar is desired
-          where normally a list would be present, such as a bi-directional
-          one-to-one relationship, set :paramref:`~.relationship.uselist` to
-          False.
-
-          The :paramref:`~.relationship.uselist` flag is also available on an
-          existing :func:`.relationship` construct as a read-only attribute,
-          which can be used to determine if this :func:`.relationship` deals
-          with collections or scalar attributes::
-
-              >>> User.addresses.property.uselist
-              True
-
-          .. seealso::
-
-              :ref:`relationships_one_to_one` - Introduction to the "one to
-              one" relationship pattern, which is typically when the
-              :paramref:`~.relationship.uselist` flag is needed.
-
-        :param viewonly=False:
-          when set to True, the relationship is used only for loading objects,
-          and not for any persistence operation.  A :func:`.relationship`
-          which specifies :paramref:`~.relationship.viewonly` can work
-          with a wider range of SQL operations within the
-          :paramref:`~.relationship.primaryjoin` condition, including
-          operations that feature the use of a variety of comparison operators
-          as well as SQL functions such as :func:`~.sql.expression.cast`.  The
-          :paramref:`~.relationship.viewonly` flag is also of general use when
-          defining any kind of :func:`~.relationship` that doesn't represent
-          the full set of related objects, to prevent modifications of the
-          collection from resulting in persistence operations.
-
-        :param omit_join:
-          Allows manual control over the "selectin" automatic join
-          optimization.  Set to ``False`` to disable the "omit join" feature
-          added in SQLAlchemy 1.3.
-
-          .. versionadded:: 1.3
-
-
-        """
-        super(RelationshipProperty, self).__init__()
+        super().__init__(attribute_options=attribute_options)
 
         self.uselist = uselist
         self.argument = argument
-        self.secondary = secondary
-        self.primaryjoin = primaryjoin
-        self.secondaryjoin = secondaryjoin
+
+        self._init_args = _RelationshipArgs(
+            _RelationshipArg("secondary", secondary, None),
+            _RelationshipArg("primaryjoin", primaryjoin, None),
+            _RelationshipArg("secondaryjoin", secondaryjoin, None),
+            _RelationshipArg("order_by", order_by, None),
+            _RelationshipArg("foreign_keys", foreign_keys, None),
+            _RelationshipArg("remote_side", remote_side, None),
+        )
+
         self.post_update = post_update
-        self.direction = None
         self.viewonly = viewonly
+        if viewonly:
+            self._warn_for_persistence_only_flags(
+                passive_deletes=passive_deletes,
+                passive_updates=passive_updates,
+                enable_typechecks=enable_typechecks,
+                active_history=active_history,
+                cascade_backrefs=cascade_backrefs,
+            )
+        if viewonly and sync_backref:
+            raise sa_exc.ArgumentError(
+                "sync_backref and viewonly cannot both be True"
+            )
+        self.sync_backref = sync_backref
         self.lazy = lazy
         self.single_parent = single_parent
-        self._user_defined_foreign_keys = foreign_keys
         self.collection_class = collection_class
         self.passive_deletes = passive_deletes
-        self.cascade_backrefs = cascade_backrefs
+
+        if cascade_backrefs:
+            raise sa_exc.ArgumentError(
+                "The 'cascade_backrefs' parameter passed to "
+                "relationship() may only be set to False."
+            )
+
         self.passive_updates = passive_updates
-        self.remote_side = remote_side
         self.enable_typechecks = enable_typechecks
         self.query_class = query_class
         self.innerjoin = innerjoin
         self.distinct_target_key = distinct_target_key
         self.doc = doc
         self.active_history = active_history
+        self._legacy_inactive_history_style = _legacy_inactive_history_style
+
         self.join_depth = join_depth
+        if omit_join:
+            util.warn(
+                "setting omit_join to True is not supported; selectin "
+                "loading of this relationship may not work correctly if this "
+                "flag is set explicitly.  omit_join optimization is "
+                "automatically detected for conditions under which it is "
+                "supported."
+            )
+
         self.omit_join = omit_join
         self.local_remote_pairs = _local_remote_pairs
-        self.extension = extension
-        self.bake_queries = bake_queries
         self.load_on_pending = load_on_pending
         self.comparator_factory = (
             comparator_factory or RelationshipProperty.Comparator
         )
-        self.comparator = self.comparator_factory(self, None)
         util.set_creation_order(self)
 
         if info is not None:
-            self.info = info
+            self.info.update(info)
 
         self.strategy_key = (("lazy", self.lazy),)
 
-        self._reverse_property = set()
+        self._reverse_property: Set[RelationshipProperty[Any]] = set()
 
-        self.cascade = (
-            cascade if cascade is not False else "save-update, merge"
-        )
+        if overlaps:
+            self._overlaps = set(re.split(r"\s*,\s*", overlaps))  # type: ignore  # noqa: E501
+        else:
+            self._overlaps = ()
 
-        self.order_by = order_by
+        # mypy ignoring the @property setter
+        self.cascade = cascade  # type: ignore
 
         self.back_populates = back_populates
 
@@ -897,7 +501,25 @@ class RelationshipProperty(StrategizedProperty):
         else:
             self.backref = backref
 
-    def instrument_class(self, mapper):
+    def _warn_for_persistence_only_flags(self, **kw: Any) -> None:
+        for k, v in kw.items():
+            if v != self._persistence_only[k]:
+                # we are warning here rather than warn deprecated as this is a
+                # configuration mistake, and Python shows regular warnings more
+                # aggressively than deprecation warnings by default. Unlike the
+                # case of setting viewonly with cascade, the settings being
+                # warned about here are not actively doing the wrong thing
+                # against viewonly=True, so it is not as urgent to have these
+                # raise an error.
+                util.warn(
+                    "Setting %s on relationship() while also "
+                    "setting viewonly=True does not make sense, as a "
+                    "viewonly=True relationship does not perform persistence "
+                    "operations. This configuration may raise an error "
+                    "in a future release." % (k,)
+                )
+
+    def instrument_class(self, mapper: Mapper[Any]) -> None:
         attributes.register_descriptor(
             mapper.class_,
             self.key,
@@ -906,7 +528,7 @@ class RelationshipProperty(StrategizedProperty):
             doc=self.doc,
         )
 
-    class Comparator(PropComparator):
+    class Comparator(util.MemoizedSlots, PropComparator[_PT]):
         """Produce boolean, comparison, and other operators for
         :class:`.RelationshipProperty` attributes.
 
@@ -927,10 +549,24 @@ class RelationshipProperty(StrategizedProperty):
 
         """
 
-        _of_type = None
+        __slots__ = (
+            "entity",
+            "mapper",
+            "property",
+            "_of_type",
+            "_extra_criteria",
+        )
+
+        prop: RODescriptorReference[RelationshipProperty[_PT]]
+        _of_type: Optional[_EntityType[_PT]]
 
         def __init__(
-            self, prop, parentmapper, adapt_to_entity=None, of_type=None
+            self,
+            prop: RelationshipProperty[_PT],
+            parentmapper: _InternalEntityType[Any],
+            adapt_to_entity: Optional[AliasedInsp[Any]] = None,
+            of_type: Optional[_EntityType[_PT]] = None,
+            extra_criteria: Tuple[ColumnElement[bool], ...] = (),
         ):
             """Construction of :class:`.RelationshipProperty.Comparator`
             is internal to the ORM's attribute mechanics.
@@ -941,56 +577,62 @@ class RelationshipProperty(StrategizedProperty):
             self._adapt_to_entity = adapt_to_entity
             if of_type:
                 self._of_type = of_type
+            else:
+                self._of_type = None
+            self._extra_criteria = extra_criteria
 
-        def adapt_to_entity(self, adapt_to_entity):
+        def adapt_to_entity(
+            self, adapt_to_entity: AliasedInsp[Any]
+        ) -> RelationshipProperty.Comparator[Any]:
             return self.__class__(
-                self.property,
+                self.prop,
                 self._parententity,
                 adapt_to_entity=adapt_to_entity,
                 of_type=self._of_type,
             )
 
-        @util.memoized_property
-        def entity(self):
-            """The target entity referred to by this
-            :class:`.RelationshipProperty.Comparator`.
+        entity: _InternalEntityType[_PT]
+        """The target entity referred to by this
+        :class:`.RelationshipProperty.Comparator`.
 
-            This is either a :class:`.Mapper` or :class:`.AliasedInsp`
-            object.
+        This is either a :class:`_orm.Mapper` or :class:`.AliasedInsp`
+        object.
 
-            This is the "target" or "remote" side of the
-            :func:`.relationship`.
+        This is the "target" or "remote" side of the
+        :func:`_orm.relationship`.
 
-            """
-            return self.property.entity
+        """
 
-        @util.memoized_property
-        def mapper(self):
-            """The target :class:`.Mapper` referred to by this
-            :class:`.RelationshipProperty.Comparator`.
+        mapper: Mapper[_PT]
+        """The target :class:`_orm.Mapper` referred to by this
+        :class:`.RelationshipProperty.Comparator`.
 
-            This is the "target" or "remote" side of the
-            :func:`.relationship`.
+        This is the "target" or "remote" side of the
+        :func:`_orm.relationship`.
 
-            """
-            return self.property.mapper
+        """
 
-        @util.memoized_property
-        def _parententity(self):
-            return self.property.parent
+        def _memoized_attr_entity(self) -> _InternalEntityType[_PT]:
+            if self._of_type:
+                return inspect(self._of_type)  # type: ignore
+            else:
+                return self.prop.entity
 
-        def _source_selectable(self):
+        def _memoized_attr_mapper(self) -> Mapper[_PT]:
+            return self.entity.mapper
+
+        def _source_selectable(self) -> FromClause:
             if self._adapt_to_entity:
                 return self._adapt_to_entity.selectable
             else:
                 return self.property.parent._with_polymorphic_selectable
 
-        def __clause_element__(self):
+        def __clause_element__(self) -> ColumnElement[bool]:
             adapt_from = self._source_selectable()
             if self._of_type:
-                of_type_mapper = inspect(self._of_type).mapper
+                of_type_entity = inspect(self._of_type)
             else:
-                of_type_mapper = None
+                of_type_entity = None
 
             (
                 pj,
@@ -999,32 +641,59 @@ class RelationshipProperty(StrategizedProperty):
                 dest,
                 secondary,
                 target_adapter,
-            ) = self.property._create_joins(
+            ) = self.prop._create_joins(
                 source_selectable=adapt_from,
                 source_polymorphic=True,
-                of_type_mapper=of_type_mapper,
+                of_type_entity=of_type_entity,
+                alias_secondary=True,
+                extra_criteria=self._extra_criteria,
             )
             if sj is not None:
                 return pj & sj
             else:
                 return pj
 
-        def of_type(self, cls):
+        def of_type(self, class_: _EntityType[Any]) -> PropComparator[_PT]:
             r"""Redefine this object in terms of a polymorphic subclass.
 
             See :meth:`.PropComparator.of_type` for an example.
 
+
             """
             return RelationshipProperty.Comparator(
-                self.property,
+                self.prop,
                 self._parententity,
                 adapt_to_entity=self._adapt_to_entity,
-                of_type=cls,
+                of_type=class_,
+                extra_criteria=self._extra_criteria,
             )
 
-        def in_(self, other):
+        def and_(
+            self, *criteria: _ColumnExpressionArgument[bool]
+        ) -> PropComparator[Any]:
+            """Add AND criteria.
+
+            See :meth:`.PropComparator.and_` for an example.
+
+            .. versionadded:: 1.4
+
+            """
+            exprs = tuple(
+                coercions.expect(roles.WhereHavingRole, clause)
+                for clause in util.coerce_generator_arg(criteria)
+            )
+
+            return RelationshipProperty.Comparator(
+                self.prop,
+                self._parententity,
+                adapt_to_entity=self._adapt_to_entity,
+                of_type=self._of_type,
+                extra_criteria=self._extra_criteria + exprs,
+            )
+
+        def in_(self, other: Any) -> NoReturn:
             """Produce an IN clause - this is not implemented
-            for :func:`~.orm.relationship`-based attributes at this time.
+            for :func:`_orm.relationship`-based attributes at this time.
 
             """
             raise NotImplementedError(
@@ -1034,9 +703,10 @@ class RelationshipProperty(StrategizedProperty):
                 "the set of foreign key values."
             )
 
-        __hash__ = None
+        # https://github.com/python/mypy/issues/4266
+        __hash__ = None  # type: ignore
 
-        def __eq__(self, other):
+        def __eq__(self, other: Any) -> ColumnElement[bool]:  # type: ignore[override]  # noqa: E501
             """Implement the ``==`` operator.
 
             In a many-to-one context, such as::
@@ -1055,7 +725,7 @@ class RelationshipProperty(StrategizedProperty):
             many-to-one comparisons:
 
             * Comparisons against collections are not supported.
-              Use :meth:`~.RelationshipProperty.Comparator.contains`.
+              Use :meth:`~.Relationship.Comparator.contains`.
             * Compared to a scalar one-to-many, will produce a
               clause that compares the target columns in the parent to
               the given target.
@@ -1066,14 +736,14 @@ class RelationshipProperty(StrategizedProperty):
               queries that go beyond simple AND conjunctions of
               comparisons, such as those which use OR. Use
               explicit joins, outerjoins, or
-              :meth:`~.RelationshipProperty.Comparator.has` for
+              :meth:`~.Relationship.Comparator.has` for
               more comprehensive non-many-to-one scalar
               membership tests.
             * Comparisons against ``None`` given in a one-to-many
               or many-to-many context produce a NOT EXISTS clause.
 
             """
-            if isinstance(other, (util.NoneType, expression.Null)):
+            if other is None or isinstance(other, expression.Null):
                 if self.property.direction in [ONETOMANY, MANYTOMANY]:
                     return ~self._criterion_exists()
                 else:
@@ -1094,23 +764,36 @@ class RelationshipProperty(StrategizedProperty):
                     )
                 )
 
-        def _criterion_exists(self, criterion=None, **kwargs):
+        def _criterion_exists(
+            self,
+            criterion: Optional[_ColumnExpressionArgument[bool]] = None,
+            **kwargs: Any,
+        ) -> Exists:
+            where_criteria = (
+                coercions.expect(roles.WhereHavingRole, criterion)
+                if criterion is not None
+                else None
+            )
+
             if getattr(self, "_of_type", None):
-                info = inspect(self._of_type)
+                info: Optional[_InternalEntityType[Any]] = inspect(
+                    self._of_type
+                )
+                assert info is not None
                 target_mapper, to_selectable, is_aliased_class = (
                     info.mapper,
                     info.selectable,
                     info.is_aliased_class,
                 )
                 if self.property._is_self_referential and not is_aliased_class:
-                    to_selectable = to_selectable.alias()
+                    to_selectable = to_selectable._anonymous_fromclause()
 
                 single_crit = target_mapper._single_table_criterion
                 if single_crit is not None:
-                    if criterion is not None:
-                        criterion = single_crit & criterion
+                    if where_criteria is not None:
+                        where_criteria = single_crit & where_criteria
                     else:
-                        criterion = single_crit
+                        where_criteria = single_crit
             else:
                 is_aliased_class = False
                 to_selectable = None
@@ -1128,17 +811,16 @@ class RelationshipProperty(StrategizedProperty):
                 secondary,
                 target_adapter,
             ) = self.property._create_joins(
-                dest_polymorphic=True,
                 dest_selectable=to_selectable,
                 source_selectable=source_selectable,
             )
 
             for k in kwargs:
                 crit = getattr(self.property.mapper.class_, k) == kwargs[k]
-                if criterion is None:
-                    criterion = crit
+                if where_criteria is None:
+                    where_criteria = crit
                 else:
-                    criterion = criterion & crit
+                    where_criteria = where_criteria & crit
 
             # annotate the *local* side of the join condition, in the case
             # of pj + sj this is the full primaryjoin, in the case of just
@@ -1149,36 +831,46 @@ class RelationshipProperty(StrategizedProperty):
                 j = _orm_annotate(pj, exclude=self.property.remote_side)
 
             if (
-                criterion is not None
+                where_criteria is not None
                 and target_adapter
                 and not is_aliased_class
             ):
                 # limit this adapter to annotated only?
-                criterion = target_adapter.traverse(criterion)
+                where_criteria = target_adapter.traverse(where_criteria)
 
             # only have the "joined left side" of what we
             # return be subject to Query adaption.  The right
             # side of it is used for an exists() subquery and
             # should not correlate or otherwise reach out
             # to anything in the enclosing query.
-            if criterion is not None:
-                criterion = criterion._annotate(
+            if where_criteria is not None:
+                where_criteria = where_criteria._annotate(
                     {"no_replacement_traverse": True}
                 )
 
-            crit = j & sql.True_._ifnone(criterion)
+            crit = j & sql.True_._ifnone(where_criteria)
 
             if secondary is not None:
-                ex = sql.exists(
-                    [1], crit, from_obj=[dest, secondary]
-                ).correlate_except(dest, secondary)
+                ex = (
+                    sql.exists(1)
+                    .where(crit)
+                    .select_from(dest, secondary)
+                    .correlate_except(dest, secondary)
+                )
             else:
-                ex = sql.exists([1], crit, from_obj=dest).correlate_except(
-                    dest
+                ex = (
+                    sql.exists(1)
+                    .where(crit)
+                    .select_from(dest)
+                    .correlate_except(dest)
                 )
             return ex
 
-        def any(self, criterion=None, **kwargs):
+        def any(
+            self,
+            criterion: Optional[_ColumnExpressionArgument[bool]] = None,
+            **kwargs: Any,
+        ) -> ColumnElement[bool]:
             """Produce an expression that tests a collection against
             particular criterion, using EXISTS.
 
@@ -1195,12 +887,12 @@ class RelationshipProperty(StrategizedProperty):
                 EXISTS (SELECT 1 FROM related WHERE related.my_id=my_table.id
                 AND related.x=2)
 
-            Because :meth:`~.RelationshipProperty.Comparator.any` uses
+            Because :meth:`~.Relationship.Comparator.any` uses
             a correlated subquery, its performance is not nearly as
             good when compared against large target tables as that of
             using a join.
 
-            :meth:`~.RelationshipProperty.Comparator.any` is particularly
+            :meth:`~.Relationship.Comparator.any` is particularly
             useful for testing for empty collections::
 
                 session.query(MyClass).filter(
@@ -1210,13 +902,13 @@ class RelationshipProperty(StrategizedProperty):
             will produce::
 
                 SELECT * FROM my_table WHERE
-                NOT EXISTS (SELECT 1 FROM related WHERE
-                related.my_id=my_table.id)
+                NOT (EXISTS (SELECT 1 FROM related WHERE
+                related.my_id=my_table.id))
 
-            :meth:`~.RelationshipProperty.Comparator.any` is only
-            valid for collections, i.e. a :func:`.relationship`
+            :meth:`~.Relationship.Comparator.any` is only
+            valid for collections, i.e. a :func:`_orm.relationship`
             that has ``uselist=True``.  For scalar references,
-            use :meth:`~.RelationshipProperty.Comparator.has`.
+            use :meth:`~.Relationship.Comparator.has`.
 
             """
             if not self.property.uselist:
@@ -1227,7 +919,11 @@ class RelationshipProperty(StrategizedProperty):
 
             return self._criterion_exists(criterion, **kwargs)
 
-        def has(self, criterion=None, **kwargs):
+        def has(
+            self,
+            criterion: Optional[_ColumnExpressionArgument[bool]] = None,
+            **kwargs: Any,
+        ) -> ColumnElement[bool]:
             """Produce an expression that tests a scalar reference against
             particular criterion, using EXISTS.
 
@@ -1244,30 +940,32 @@ class RelationshipProperty(StrategizedProperty):
                 EXISTS (SELECT 1 FROM related WHERE
                 related.id==my_table.related_id AND related.x=2)
 
-            Because :meth:`~.RelationshipProperty.Comparator.has` uses
+            Because :meth:`~.Relationship.Comparator.has` uses
             a correlated subquery, its performance is not nearly as
             good when compared against large target tables as that of
             using a join.
 
-            :meth:`~.RelationshipProperty.Comparator.has` is only
-            valid for scalar references, i.e. a :func:`.relationship`
+            :meth:`~.Relationship.Comparator.has` is only
+            valid for scalar references, i.e. a :func:`_orm.relationship`
             that has ``uselist=False``.  For collection references,
-            use :meth:`~.RelationshipProperty.Comparator.any`.
+            use :meth:`~.Relationship.Comparator.any`.
 
             """
             if self.property.uselist:
                 raise sa_exc.InvalidRequestError(
-                    "'has()' not implemented for collections.  " "Use any()."
+                    "'has()' not implemented for collections. Use any()."
                 )
             return self._criterion_exists(criterion, **kwargs)
 
-        def contains(self, other, **kwargs):
+        def contains(
+            self, other: _ColumnExpressionArgument[Any], **kwargs: Any
+        ) -> ColumnElement[bool]:
             """Return a simple expression that tests a collection for
             containment of a particular item.
 
-            :meth:`~.RelationshipProperty.Comparator.contains` is
+            :meth:`~.Relationship.Comparator.contains` is
             only valid for a collection, i.e. a
-            :func:`~.orm.relationship` that implements
+            :func:`_orm.relationship` that implements
             one-to-many or many-to-many with ``uselist=True``.
 
             When used in a simple one-to-many context, an
@@ -1282,12 +980,12 @@ class RelationshipProperty(StrategizedProperty):
             Where ``<some id>`` is the value of the foreign key
             attribute on ``other`` which refers to the primary
             key of its parent object. From this it follows that
-            :meth:`~.RelationshipProperty.Comparator.contains` is
+            :meth:`~.Relationship.Comparator.contains` is
             very useful when used with simple one-to-many
             operations.
 
             For many-to-many operations, the behavior of
-            :meth:`~.RelationshipProperty.Comparator.contains`
+            :meth:`~.Relationship.Comparator.contains`
             has more caveats. The association table will be
             rendered in the statement, producing an "implicit"
             join, that is, includes multiple tables in the FROM
@@ -1304,50 +1002,61 @@ class RelationshipProperty(StrategizedProperty):
 
             Where ``<some id>`` would be the primary key of
             ``other``. From the above, it is clear that
-            :meth:`~.RelationshipProperty.Comparator.contains`
+            :meth:`~.Relationship.Comparator.contains`
             will **not** work with many-to-many collections when
             used in queries that move beyond simple AND
             conjunctions, such as multiple
-            :meth:`~.RelationshipProperty.Comparator.contains`
+            :meth:`~.Relationship.Comparator.contains`
             expressions joined by OR. In such cases subqueries or
             explicit "outer joins" will need to be used instead.
-            See :meth:`~.RelationshipProperty.Comparator.any` for
+            See :meth:`~.Relationship.Comparator.any` for
             a less-performant alternative using EXISTS, or refer
-            to :meth:`.Query.outerjoin` as well as :ref:`ormtutorial_joins`
+            to :meth:`_query.Query.outerjoin`
+            as well as :ref:`orm_queryguide_joins`
             for more details on constructing outer joins.
 
+            kwargs may be ignored by this operator but are required for API
+            conformance.
             """
-            if not self.property.uselist:
+            if not self.prop.uselist:
                 raise sa_exc.InvalidRequestError(
                     "'contains' not implemented for scalar "
                     "attributes.  Use =="
                 )
-            clause = self.property._optimized_compare(
+
+            clause = self.prop._optimized_compare(
                 other, adapt_source=self.adapter
             )
 
-            if self.property.secondaryjoin is not None:
+            if self.prop.secondaryjoin is not None:
                 clause.negation_clause = self.__negated_contains_or_equals(
                     other
                 )
 
             return clause
 
-        def __negated_contains_or_equals(self, other):
-            if self.property.direction == MANYTOONE:
+        def __negated_contains_or_equals(
+            self, other: Any
+        ) -> ColumnElement[bool]:
+            if self.prop.direction == MANYTOONE:
                 state = attributes.instance_state(other)
 
-                def state_bindparam(x, state, col):
+                def state_bindparam(
+                    local_col: ColumnElement[Any],
+                    state: InstanceState[Any],
+                    remote_col: ColumnElement[Any],
+                ) -> BindParameter[Any]:
                     dict_ = state.dict
                     return sql.bindparam(
-                        x,
+                        local_col.key,
+                        type_=local_col.type,
                         unique=True,
-                        callable_=self.property._get_attr_w_warn_on_none(
-                            self.property.mapper, state, dict_, col
+                        callable_=self.prop._get_attr_w_warn_on_none(
+                            self.prop.mapper, state, dict_, remote_col
                         ),
                     )
 
-                def adapt(col):
+                def adapt(col: _CE) -> _CE:
                     if self.adapter:
                         return self.adapter(col)
                     else:
@@ -1377,7 +1086,7 @@ class RelationshipProperty(StrategizedProperty):
 
             return ~self._criterion_exists(criterion)
 
-        def __ne__(self, other):
+        def __ne__(self, other: Any) -> ColumnElement[bool]:  # type: ignore[override]  # noqa: E501
             """Implement the ``!=`` operator.
 
             In a many-to-one context, such as::
@@ -1396,8 +1105,8 @@ class RelationshipProperty(StrategizedProperty):
 
             * Comparisons against collections are not supported.
               Use
-              :meth:`~.RelationshipProperty.Comparator.contains`
-              in conjunction with :func:`~.expression.not_`.
+              :meth:`~.Relationship.Comparator.contains`
+              in conjunction with :func:`_expression.not_`.
             * Compared to a scalar one-to-many, will produce a
               clause that compares the target columns in the parent to
               the given target.
@@ -1408,15 +1117,15 @@ class RelationshipProperty(StrategizedProperty):
               queries that go beyond simple AND conjunctions of
               comparisons, such as those which use OR. Use
               explicit joins, outerjoins, or
-              :meth:`~.RelationshipProperty.Comparator.has` in
-              conjunction with :func:`~.expression.not_` for
+              :meth:`~.Relationship.Comparator.has` in
+              conjunction with :func:`_expression.not_` for
               more comprehensive non-many-to-one scalar
               membership tests.
             * Comparisons against ``None`` given in a one-to-many
               or many-to-many context produce an EXISTS clause.
 
             """
-            if isinstance(other, (util.NoneType, expression.Null)):
+            if other is None or isinstance(other, expression.Null):
                 if self.property.direction == MANYTOONE:
                     return _orm_annotate(
                         ~self.property._optimized_compare(
@@ -1435,18 +1144,22 @@ class RelationshipProperty(StrategizedProperty):
             else:
                 return _orm_annotate(self.__negated_contains_or_equals(other))
 
-        @util.memoized_property
-        def property(self):
-            if mapperlib.Mapper._new_mappers:
-                mapperlib.Mapper._configure_all()
+        def _memoized_attr_property(self) -> RelationshipProperty[_PT]:
+            self.prop.parent._check_configure()
             return self.prop
 
-    def _with_parent(self, instance, alias_secondary=True, from_entity=None):
+    def _with_parent(
+        self,
+        instance: object,
+        alias_secondary: bool = True,
+        from_entity: Optional[_EntityType[Any]] = None,
+    ) -> ColumnElement[bool]:
         assert instance is not None
-        adapt_source = None
+        adapt_source: Optional[_CoreAdapterProto] = None
         if from_entity is not None:
-            insp = inspect(from_entity)
-            if insp.is_aliased_class:
+            insp: Optional[_InternalEntityType[Any]] = inspect(from_entity)
+            assert insp is not None
+            if insp_is_aliased_class(insp):
                 adapt_source = insp._adapter.adapt_clause
         return self._optimized_compare(
             instance,
@@ -1457,14 +1170,25 @@ class RelationshipProperty(StrategizedProperty):
 
     def _optimized_compare(
         self,
-        state,
-        value_is_parent=False,
-        adapt_source=None,
-        alias_secondary=True,
-    ):
+        state: Any,
+        value_is_parent: bool = False,
+        adapt_source: Optional[_CoreAdapterProto] = None,
+        alias_secondary: bool = True,
+    ) -> ColumnElement[bool]:
         if state is not None:
-            state = attributes.instance_state(state)
+            try:
+                state = inspect(state)
+            except sa_exc.NoInspectionAvailable:
+                state = None
 
+            if state is None or not getattr(state, "is_instance", False):
+                raise sa_exc.ArgumentError(
+                    "Mapped instance expected for relationship "
+                    "comparison to object.   Classes, queries and other "
+                    "SQL elements are not accepted in this context; for "
+                    "comparison with a subquery, "
+                    "use %s.has(**criteria)." % self
+                )
         reverse_direction = not value_is_parent
 
         if state is None:
@@ -1490,7 +1214,7 @@ class RelationshipProperty(StrategizedProperty):
 
         dict_ = attributes.instance_dict(state.obj())
 
-        def visit_bindparam(bindparam):
+        def visit_bindparam(bindparam: BindParameter[Any]) -> None:
             if bindparam._identifying_key in bind_to_col:
                 bindparam.callable = self._get_attr_w_warn_on_none(
                     mapper,
@@ -1500,9 +1224,9 @@ class RelationshipProperty(StrategizedProperty):
                 )
 
         if self.secondary is not None and alias_secondary:
-            criterion = ClauseAdapter(self.secondary.alias()).traverse(
-                criterion
-            )
+            criterion = ClauseAdapter(
+                self.secondary._anonymous_fromclause()
+            ).traverse(criterion)
 
         criterion = visitors.cloned_traverse(
             criterion, {}, {"bindparam": visit_bindparam}
@@ -1512,7 +1236,13 @@ class RelationshipProperty(StrategizedProperty):
             criterion = adapt_source(criterion)
         return criterion
 
-    def _get_attr_w_warn_on_none(self, mapper, state, dict_, column):
+    def _get_attr_w_warn_on_none(
+        self,
+        mapper: Mapper[Any],
+        state: InstanceState[Any],
+        dict_: _InstanceDict,
+        column: ColumnElement[Any],
+    ) -> Callable[[], Any]:
         """Create the callable that is used in a many-to-one expression.
 
         E.g.::
@@ -1562,9 +1292,14 @@ class RelationshipProperty(StrategizedProperty):
         # this feature was added explicitly for use in this method.
         state._track_last_known_value(prop.key)
 
-        def _go():
-            last_known = to_return = state._last_known_values[prop.key]
-            existing_is_available = last_known is not attributes.NO_VALUE
+        lkv_fixed = state._last_known_values
+
+        def _go() -> Any:
+            assert lkv_fixed is not None
+            last_known = to_return = lkv_fixed[prop.key]
+            existing_is_available = (
+                last_known is not LoaderCallableStatus.NO_VALUE
+            )
 
             # we support that the value may have changed.  so here we
             # try to get the most recent value including re-fetching.
@@ -1574,19 +1309,21 @@ class RelationshipProperty(StrategizedProperty):
                 state,
                 dict_,
                 column,
-                passive=attributes.PASSIVE_OFF
-                if state.persistent
-                else attributes.PASSIVE_NO_FETCH ^ attributes.INIT_OK,
+                passive=(
+                    PassiveFlag.PASSIVE_OFF
+                    if state.persistent
+                    else PassiveFlag.PASSIVE_NO_FETCH ^ PassiveFlag.INIT_OK
+                ),
             )
 
-            if current_value is attributes.NEVER_SET:
+            if current_value is LoaderCallableStatus.NEVER_SET:
                 if not existing_is_available:
                     raise sa_exc.InvalidRequestError(
                         "Can't resolve value for column %s on object "
                         "%s; no value has been set for this column"
                         % (column, state_str(state))
                     )
-            elif current_value is attributes.PASSIVE_NO_RESULT:
+            elif current_value is LoaderCallableStatus.PASSIVE_NO_RESULT:
                 if not existing_is_available:
                     raise sa_exc.InvalidRequestError(
                         "Can't resolve value for column %s on object "
@@ -1606,7 +1343,11 @@ class RelationshipProperty(StrategizedProperty):
 
         return _go
 
-    def _lazy_none_clause(self, reverse_direction=False, adapt_source=None):
+    def _lazy_none_clause(
+        self,
+        reverse_direction: bool = False,
+        adapt_source: Optional[_CoreAdapterProto] = None,
+    ) -> ColumnElement[bool]:
         if not reverse_direction:
             criterion, bind_to_col = (
                 self._lazy_strategy._lazywhere,
@@ -1624,21 +1365,20 @@ class RelationshipProperty(StrategizedProperty):
             criterion = adapt_source(criterion)
         return criterion
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.parent.class_.__name__) + "." + self.key
 
     def merge(
         self,
-        session,
-        source_state,
-        source_dict,
-        dest_state,
-        dest_dict,
-        load,
-        _recursive,
-        _resolve_conflict_map,
-    ):
-
+        session: Session,
+        source_state: InstanceState[Any],
+        source_dict: _InstanceDict,
+        dest_state: InstanceState[Any],
+        dest_dict: _InstanceDict,
+        load: bool,
+        _recursive: Dict[Any, object],
+        _resolve_conflict_map: Dict[_IdentityKeyType[Any], object],
+    ) -> None:
         if load:
             for r in self._reverse_property:
                 if (source_state, r) in _recursive:
@@ -1651,23 +1391,28 @@ class RelationshipProperty(StrategizedProperty):
             return
 
         if self.uselist:
-            instances = source_state.get_impl(self.key).get(
-                source_state, source_dict
-            )
-            if hasattr(instances, "_sa_adapter"):
-                # convert collections to adapters to get a true iterator
-                instances = instances._sa_adapter
+            impl = source_state.get_impl(self.key)
+
+            assert is_has_collection_adapter(impl)
+            instances_iterable = impl.get_collection(source_state, source_dict)
+
+            # if this is a CollectionAttributeImpl, then empty should
+            # be False, otherwise "self.key in source_dict" should not be
+            # True
+            assert not instances_iterable.empty if impl.collection else True
 
             if load:
                 # for a full merge, pre-load the destination collection,
                 # so that individual _merge of each item pulls from identity
                 # map for those already present.
-                # also assumes CollectionAttrbiuteImpl behavior of loading
+                # also assumes CollectionAttributeImpl behavior of loading
                 # "old" list in any case
-                dest_state.get_impl(self.key).get(dest_state, dest_dict)
+                dest_state.get_impl(self.key).get(
+                    dest_state, dest_dict, passive=PassiveFlag.PASSIVE_MERGE
+                )
 
             dest_list = []
-            for current in instances:
+            for current in instances_iterable:
                 current_state = attributes.instance_state(current)
                 current_dict = attributes.instance_dict(current)
                 _recursive[(current_state, self)] = True
@@ -1688,8 +1433,14 @@ class RelationshipProperty(StrategizedProperty):
                 for c in dest_list:
                     coll.append_without_event(c)
             else:
-                dest_state.get_impl(self.key).set(
-                    dest_state, dest_dict, dest_list, _adapt=False
+                dest_impl = dest_state.get_impl(self.key)
+                assert is_has_collection_adapter(dest_impl)
+                dest_impl.set(
+                    dest_state,
+                    dest_dict,
+                    dest_list,
+                    _adapt=False,
+                    passive=PassiveFlag.PASSIVE_MERGE,
                 )
         else:
             current = source_dict[self.key]
@@ -1715,8 +1466,12 @@ class RelationshipProperty(StrategizedProperty):
                 )
 
     def _value_as_iterable(
-        self, state, dict_, key, passive=attributes.PASSIVE_OFF
-    ):
+        self,
+        state: InstanceState[_O],
+        dict_: _InstanceDict,
+        key: str,
+        passive: PassiveFlag = PassiveFlag.PASSIVE_OFF,
+    ) -> Sequence[Tuple[InstanceState[_O], _O]]:
         """Return a list of tuples (state, obj) for the given
         key.
 
@@ -1725,9 +1480,9 @@ class RelationshipProperty(StrategizedProperty):
 
         impl = state.manager[key].impl
         x = impl.get(state, dict_, passive=passive)
-        if x is attributes.PASSIVE_NO_RESULT or x is None:
+        if x is LoaderCallableStatus.PASSIVE_NO_RESULT or x is None:
             return []
-        elif hasattr(impl, "get_collection"):
+        elif is_has_collection_adapter(impl):
             return [
                 (attributes.instance_state(o), o)
                 for o in impl.get_collection(state, dict_, x, passive=passive)
@@ -1736,19 +1491,23 @@ class RelationshipProperty(StrategizedProperty):
             return [(attributes.instance_state(x), x)]
 
     def cascade_iterator(
-        self, type_, state, dict_, visited_states, halt_on=None
-    ):
+        self,
+        type_: str,
+        state: InstanceState[Any],
+        dict_: _InstanceDict,
+        visited_states: Set[InstanceState[Any]],
+        halt_on: Optional[Callable[[InstanceState[Any]], bool]] = None,
+    ) -> Iterator[Tuple[Any, Mapper[Any], InstanceState[Any], _InstanceDict]]:
         # assert type_ in self._cascade
 
         # only actively lazy load on the 'delete' cascade
         if type_ != "delete" or self.passive_deletes:
-            passive = attributes.PASSIVE_NO_INITIALIZE
+            passive = PassiveFlag.PASSIVE_NO_INITIALIZE
         else:
-            passive = attributes.PASSIVE_OFF
+            passive = PassiveFlag.PASSIVE_OFF | PassiveFlag.NO_RAISE
 
         if type_ == "save-update":
             tuples = state.manager[self.key].impl.get_all_pending(state, dict_)
-
         else:
             tuples = self._value_as_iterable(
                 state, dict_, self.key, passive=passive
@@ -1769,6 +1528,7 @@ class RelationshipProperty(StrategizedProperty):
                 # see [ticket:2229]
                 continue
 
+            assert instance_state is not None
             instance_dict = attributes.instance_dict(c)
 
             if halt_on and halt_on(instance_state):
@@ -1791,10 +1551,52 @@ class RelationshipProperty(StrategizedProperty):
 
             yield c, instance_mapper, instance_state, instance_dict
 
-    def _add_reverse_property(self, key):
+    @property
+    def _effective_sync_backref(self) -> bool:
+        if self.viewonly:
+            return False
+        else:
+            return self.sync_backref is not False
+
+    @staticmethod
+    def _check_sync_backref(
+        rel_a: RelationshipProperty[Any], rel_b: RelationshipProperty[Any]
+    ) -> None:
+        if rel_a.viewonly and rel_b.sync_backref:
+            raise sa_exc.InvalidRequestError(
+                "Relationship %s cannot specify sync_backref=True since %s "
+                "includes viewonly=True." % (rel_b, rel_a)
+            )
+        if (
+            rel_a.viewonly
+            and not rel_b.viewonly
+            and rel_b.sync_backref is not False
+        ):
+            rel_b.sync_backref = False
+
+    def _add_reverse_property(self, key: str) -> None:
         other = self.mapper.get_property(key, _configure_mappers=False)
+        if not isinstance(other, RelationshipProperty):
+            raise sa_exc.InvalidRequestError(
+                "back_populates on relationship '%s' refers to attribute '%s' "
+                "that is not a relationship.  The back_populates parameter "
+                "should refer to the name of a relationship on the target "
+                "class." % (self, other)
+            )
+        # viewonly and sync_backref cases
+        # 1. self.viewonly==True and other.sync_backref==True -> error
+        # 2. self.viewonly==True and other.viewonly==False and
+        #    other.sync_backref==None -> warn sync_backref=False, set to False
+        self._check_sync_backref(self, other)
+        # 3. other.viewonly==True and self.sync_backref==True -> error
+        # 4. other.viewonly==True and self.viewonly==False and
+        #    self.sync_backref==None -> warn sync_backref=False, set to False
+        self._check_sync_backref(other, self)
+
         self._reverse_property.add(other)
         other._reverse_property.add(self)
+
+        other._setup_entity()
 
         if not other.mapper.common_parent(self.parent):
             raise sa_exc.ArgumentError(
@@ -1805,7 +1607,8 @@ class RelationshipProperty(StrategizedProperty):
             )
 
         if (
-            self.direction in (ONETOMANY, MANYTOONE)
+            other._configure_started
+            and self.direction in (ONETOMANY, MANYTOONE)
             and self.direction == other.direction
         ):
             raise sa_exc.ArgumentError(
@@ -1816,120 +1619,276 @@ class RelationshipProperty(StrategizedProperty):
             )
 
     @util.memoized_property
-    def entity(self):  # type: () -> Union[AliasedInsp, Mapper]
+    def entity(self) -> _InternalEntityType[_T]:
         """Return the target mapped entity, which is an inspect() of the
-        class or aliased class tha is referred towards.
-
-        """
-        if util.callable(self.argument) and not isinstance(
-            self.argument, (type, mapperlib.Mapper)
-        ):
-            argument = self.argument()
-        else:
-            argument = self.argument
-
-        if isinstance(argument, type):
-            return mapperlib.class_mapper(argument, configure=False)
-
-        try:
-            entity = inspect(argument)
-        except sa_exc.NoInspectionAvailable:
-            pass
-        else:
-            if hasattr(entity, "mapper"):
-                return entity
-
-        raise sa_exc.ArgumentError(
-            "relationship '%s' expects "
-            "a class or a mapper argument (received: %s)"
-            % (self.key, type(argument))
-        )
-
-    @util.memoized_property
-    def mapper(self):
-        """Return the targeted :class:`.Mapper` for this
+        class or aliased class that is referenced by this
         :class:`.RelationshipProperty`.
 
-        This is a lazy-initializing static attribute.
+        """
+        self.parent._check_configure()
+        return self.entity
+
+    @util.memoized_property
+    def mapper(self) -> Mapper[_T]:
+        """Return the targeted :class:`_orm.Mapper` for this
+        :class:`.RelationshipProperty`.
 
         """
         return self.entity.mapper
 
-    def do_init(self):
+    def do_init(self) -> None:
         self._check_conflicts()
         self._process_dependent_arguments()
+        self._setup_entity()
+        self._setup_registry_dependencies()
         self._setup_join_conditions()
         self._check_cascade_settings(self._cascade)
         self._post_init()
         self._generate_backref()
         self._join_condition._warn_for_conflicting_sync_targets()
-        super(RelationshipProperty, self).do_init()
-        self._lazy_strategy = self._get_strategy((("lazy", "select"),))
+        super().do_init()
+        self._lazy_strategy = cast(
+            "LazyLoader", self._get_strategy((("lazy", "select"),))
+        )
 
-    def _process_dependent_arguments(self):
+    def _setup_registry_dependencies(self) -> None:
+        self.parent.mapper.registry._set_depends_on(
+            self.entity.mapper.registry
+        )
+
+    def _process_dependent_arguments(self) -> None:
         """Convert incoming configuration arguments to their
         proper form.
 
         Callables are resolved, ORM annotations removed.
 
         """
+
         # accept callables for other attributes which may require
         # deferred initialization.  This technique is used
         # by declarative "string configs" and some recipes.
+        init_args = self._init_args
+
         for attr in (
             "order_by",
             "primaryjoin",
             "secondaryjoin",
             "secondary",
-            "_user_defined_foreign_keys",
+            "foreign_keys",
             "remote_side",
         ):
-            attr_value = getattr(self, attr)
-            if util.callable(attr_value):
-                setattr(self, attr, attr_value())
+            rel_arg = getattr(init_args, attr)
+
+            rel_arg._resolve_against_registry(self._clsregistry_resolvers[1])
 
         # remove "annotations" which are present if mapped class
         # descriptors are used to create the join expression.
         for attr in "primaryjoin", "secondaryjoin":
-            val = getattr(self, attr)
+            rel_arg = getattr(init_args, attr)
+            val = rel_arg.resolved
             if val is not None:
-                setattr(
-                    self,
-                    attr,
-                    _orm_deannotate(
-                        expression._only_column_elements(val, attr)
-                    ),
+                rel_arg.resolved = _orm_deannotate(
+                    coercions.expect(
+                        roles.ColumnArgumentRole, val, argname=attr
+                    )
                 )
+
+        secondary = init_args.secondary.resolved
+        if secondary is not None and _is_mapped_class(secondary):
+            raise sa_exc.ArgumentError(
+                "secondary argument %s passed to to relationship() %s must "
+                "be a Table object or other FROM clause; can't send a mapped "
+                "class directly as rows in 'secondary' are persisted "
+                "independently of a class that is mapped "
+                "to that same table." % (secondary, self)
+            )
 
         # ensure expressions in self.order_by, foreign_keys,
         # remote_side are all columns, not strings.
-        if self.order_by is not False and self.order_by is not None:
-            self.order_by = [
-                expression._only_column_elements(x, "order_by")
-                for x in util.to_list(self.order_by)
-            ]
+        if (
+            init_args.order_by.resolved is not False
+            and init_args.order_by.resolved is not None
+        ):
+            self.order_by = tuple(
+                coercions.expect(
+                    roles.ColumnArgumentRole, x, argname="order_by"
+                )
+                for x in util.to_list(init_args.order_by.resolved)
+            )
+        else:
+            self.order_by = False
 
         self._user_defined_foreign_keys = util.column_set(
-            expression._only_column_elements(x, "foreign_keys")
-            for x in util.to_column_set(self._user_defined_foreign_keys)
+            coercions.expect(
+                roles.ColumnArgumentRole, x, argname="foreign_keys"
+            )
+            for x in util.to_column_set(init_args.foreign_keys.resolved)
         )
 
         self.remote_side = util.column_set(
-            expression._only_column_elements(x, "remote_side")
-            for x in util.to_column_set(self.remote_side)
+            coercions.expect(
+                roles.ColumnArgumentRole, x, argname="remote_side"
+            )
+            for x in util.to_column_set(init_args.remote_side.resolved)
         )
 
+    def declarative_scan(
+        self,
+        decl_scan: _ClassScanMapperConfig,
+        registry: _RegistryType,
+        cls: Type[Any],
+        originating_module: Optional[str],
+        key: str,
+        mapped_container: Optional[Type[Mapped[Any]]],
+        annotation: Optional[_AnnotationScanType],
+        extracted_mapped_annotation: Optional[_AnnotationScanType],
+        is_dataclass_field: bool,
+    ) -> None:
+        argument = extracted_mapped_annotation
+
+        if extracted_mapped_annotation is None:
+            if self.argument is None:
+                self._raise_for_required(key, cls)
+            else:
+                return
+
+        argument = extracted_mapped_annotation
+        assert originating_module is not None
+
+        if mapped_container is not None:
+            is_write_only = issubclass(mapped_container, WriteOnlyMapped)
+            is_dynamic = issubclass(mapped_container, DynamicMapped)
+            if is_write_only:
+                self.lazy = "write_only"
+                self.strategy_key = (("lazy", self.lazy),)
+            elif is_dynamic:
+                self.lazy = "dynamic"
+                self.strategy_key = (("lazy", self.lazy),)
+        else:
+            is_write_only = is_dynamic = False
+
+        argument = de_optionalize_union_types(argument)
+
+        if hasattr(argument, "__origin__"):
+            arg_origin = argument.__origin__
+            if isinstance(arg_origin, type) and issubclass(
+                arg_origin, abc.Collection
+            ):
+                if self.collection_class is None:
+                    if _py_inspect.isabstract(arg_origin):
+                        raise sa_exc.ArgumentError(
+                            f"Collection annotation type {arg_origin} cannot "
+                            "be instantiated; please provide an explicit "
+                            "'collection_class' parameter "
+                            "(e.g. list, set, etc.) to the "
+                            "relationship() function to accompany this "
+                            "annotation"
+                        )
+
+                    self.collection_class = arg_origin
+
+            elif not is_write_only and not is_dynamic:
+                self.uselist = False
+
+            if argument.__args__:  # type: ignore
+                if isinstance(arg_origin, type) and issubclass(
+                    arg_origin, typing.Mapping
+                ):
+                    type_arg = argument.__args__[-1]  # type: ignore
+                else:
+                    type_arg = argument.__args__[0]  # type: ignore
+                if hasattr(type_arg, "__forward_arg__"):
+                    str_argument = type_arg.__forward_arg__
+
+                    argument = resolve_name_to_real_class_name(
+                        str_argument, originating_module
+                    )
+                else:
+                    argument = type_arg
+            else:
+                raise sa_exc.ArgumentError(
+                    f"Generic alias {argument} requires an argument"
+                )
+        elif hasattr(argument, "__forward_arg__"):
+            argument = argument.__forward_arg__
+
+            argument = resolve_name_to_real_class_name(
+                argument, originating_module
+            )
+
+        if (
+            self.collection_class is None
+            and not is_write_only
+            and not is_dynamic
+        ):
+            self.uselist = False
+
+        # ticket #8759
+        # if a lead argument was given to relationship(), like
+        # `relationship("B")`, use that, don't replace it with class we
+        # found in the annotation.  The declarative_scan() method call here is
+        # still useful, as we continue to derive collection type and do
+        # checking of the annotation in any case.
+        if self.argument is None:
+            self.argument = cast("_RelationshipArgumentType[_T]", argument)
+
+    @util.preload_module("sqlalchemy.orm.mapper")
+    def _setup_entity(self, __argument: Any = None) -> None:
+        if "entity" in self.__dict__:
+            return
+
+        mapperlib = util.preloaded.orm_mapper
+
+        if __argument:
+            argument = __argument
+        else:
+            argument = self.argument
+
+        resolved_argument: _ExternalEntityType[Any]
+
+        if isinstance(argument, str):
+            # we might want to cleanup clsregistry API to make this
+            # more straightforward
+            resolved_argument = cast(
+                "_ExternalEntityType[Any]",
+                self._clsregistry_resolve_name(argument)(),
+            )
+        elif callable(argument) and not isinstance(
+            argument, (type, mapperlib.Mapper)
+        ):
+            resolved_argument = argument()
+        else:
+            resolved_argument = argument
+
+        entity: _InternalEntityType[Any]
+
+        if isinstance(resolved_argument, type):
+            entity = class_mapper(resolved_argument, configure=False)
+        else:
+            try:
+                entity = inspect(resolved_argument)
+            except sa_exc.NoInspectionAvailable:
+                entity = None  # type: ignore
+
+            if not hasattr(entity, "mapper"):
+                raise sa_exc.ArgumentError(
+                    "relationship '%s' expects "
+                    "a class or a mapper argument (received: %s)"
+                    % (self.key, type(resolved_argument))
+                )
+
+        self.entity = entity
         self.target = self.entity.persist_selectable
 
-    def _setup_join_conditions(self):
+    def _setup_join_conditions(self) -> None:
         self._join_condition = jc = JoinCondition(
             parent_persist_selectable=self.parent.persist_selectable,
             child_persist_selectable=self.entity.persist_selectable,
             parent_local_selectable=self.parent.local_table,
             child_local_selectable=self.entity.local_table,
-            primaryjoin=self.primaryjoin,
-            secondary=self.secondary,
-            secondaryjoin=self.secondaryjoin,
+            primaryjoin=self._init_args.primaryjoin.resolved,
+            secondary=self._init_args.secondary.resolved,
+            secondaryjoin=self._init_args.secondaryjoin.resolved,
             parent_equivalents=self.parent._equivalent_columns,
             child_equivalents=self.mapper._equivalent_columns,
             consider_as_foreign_keys=self._user_defined_foreign_keys,
@@ -1942,6 +1901,7 @@ class RelationshipProperty(StrategizedProperty):
         )
         self.primaryjoin = jc.primaryjoin
         self.secondaryjoin = jc.secondaryjoin
+        self.secondary = jc.secondary
         self.direction = jc.direction
         self.local_remote_pairs = jc.local_remote_pairs
         self.remote_side = jc.remote_columns
@@ -1950,11 +1910,34 @@ class RelationshipProperty(StrategizedProperty):
         self._calculated_foreign_keys = jc.foreign_key_columns
         self.secondary_synchronize_pairs = jc.secondary_synchronize_pairs
 
-    def _check_conflicts(self):
+    @property
+    def _clsregistry_resolve_arg(
+        self,
+    ) -> Callable[[str, bool], _class_resolver]:
+        return self._clsregistry_resolvers[1]
+
+    @property
+    def _clsregistry_resolve_name(
+        self,
+    ) -> Callable[[str], Callable[[], Union[Type[Any], Table, _ModNS]]]:
+        return self._clsregistry_resolvers[0]
+
+    @util.memoized_property
+    @util.preload_module("sqlalchemy.orm.clsregistry")
+    def _clsregistry_resolvers(
+        self,
+    ) -> Tuple[
+        Callable[[str], Callable[[], Union[Type[Any], Table, _ModNS]]],
+        Callable[[str, bool], _class_resolver],
+    ]:
+        _resolver = util.preloaded.orm_clsregistry._resolver
+
+        return _resolver(self.parent.class_, self)
+
+    def _check_conflicts(self) -> None:
         """Test that this relationship is legal, warn about
         inheritance conflicts."""
-
-        if self.parent.non_primary and not mapperlib.class_mapper(
+        if self.parent.non_primary and not class_mapper(
             self.parent.class_, configure=False
         ).has_property(self.key):
             raise sa_exc.ArgumentError(
@@ -1970,14 +1953,25 @@ class RelationshipProperty(StrategizedProperty):
                 )
             )
 
-    def _get_cascade(self):
+    @property
+    def cascade(self) -> CascadeOptions:
         """Return the current cascade setting for this
         :class:`.RelationshipProperty`.
         """
         return self._cascade
 
-    def _set_cascade(self, cascade):
-        cascade = CascadeOptions(cascade)
+    @cascade.setter
+    def cascade(self, cascade: Union[str, CascadeOptions]) -> None:
+        self._set_cascade(cascade)
+
+    def _set_cascade(self, cascade_arg: Union[str, CascadeOptions]) -> None:
+        cascade = CascadeOptions(cascade_arg)
+
+        if self.viewonly:
+            cascade = CascadeOptions(
+                cascade.intersection(CascadeOptions._viewonly_cascades)
+            )
+
         if "mapper" in self.__dict__:
             self._check_cascade_settings(cascade)
         self._cascade = cascade
@@ -1985,25 +1979,37 @@ class RelationshipProperty(StrategizedProperty):
         if self._dependency_processor:
             self._dependency_processor.cascade = cascade
 
-    cascade = property(_get_cascade, _set_cascade)
-
-    def _check_cascade_settings(self, cascade):
+    def _check_cascade_settings(self, cascade: CascadeOptions) -> None:
         if (
             cascade.delete_orphan
             and not self.single_parent
             and (self.direction is MANYTOMANY or self.direction is MANYTOONE)
         ):
             raise sa_exc.ArgumentError(
-                "On %s, delete-orphan cascade is not supported "
-                "on a many-to-many or many-to-one relationship "
-                "when single_parent is not set.   Set "
-                "single_parent=True on the relationship()." % self
-            )
-        if self.direction is MANYTOONE and self.passive_deletes:
-            util.warn(
-                "On %s, 'passive_deletes' is normally configured "
-                "on one-to-many, one-to-one, many-to-many "
-                "relationships only." % self
+                "For %(direction)s relationship %(rel)s, delete-orphan "
+                "cascade is normally "
+                'configured only on the "one" side of a one-to-many '
+                "relationship, "
+                'and not on the "many" side of a many-to-one or many-to-many '
+                "relationship.  "
+                "To force this relationship to allow a particular "
+                '"%(relatedcls)s" object to be referenced by only '
+                'a single "%(clsname)s" object at a time via the '
+                "%(rel)s relationship, which "
+                "would allow "
+                "delete-orphan cascade to take place in this direction, set "
+                "the single_parent=True flag."
+                % {
+                    "rel": self,
+                    "direction": (
+                        "many-to-one"
+                        if self.direction is MANYTOONE
+                        else "many-to-many"
+                    ),
+                    "clsname": self.parent.class_.__name__,
+                    "relatedcls": self.mapper.class_.__name__,
+                },
+                code="bbf0",
             )
 
         if self.passive_deletes == "all" and (
@@ -2019,7 +2025,7 @@ class RelationshipProperty(StrategizedProperty):
                 (self.key, self.parent.class_)
             )
 
-    def _persists_for(self, mapper):
+    def _persists_for(self, mapper: Mapper[Any]) -> bool:
         """Return True if this property will persist values on behalf
         of the given mapper.
 
@@ -2030,16 +2036,15 @@ class RelationshipProperty(StrategizedProperty):
             and mapper.relationships[self.key] is self
         )
 
-    def _columns_are_mapped(self, *cols):
+    def _columns_are_mapped(self, *cols: ColumnElement[Any]) -> bool:
         """Return True if all columns in the given collection are
-        mapped by the tables referenced by this :class:`.Relationship`.
+        mapped by the tables referenced by this :class:`.RelationshipProperty`.
 
         """
+
+        secondary = self._init_args.secondary.resolved
         for c in cols:
-            if (
-                self.secondary is not None
-                and self.secondary.c.contains_column(c)
-            ):
+            if secondary is not None and secondary.c.contains_column(c):
                 continue
             if not self.parent.persist_selectable.c.contains_column(
                 c
@@ -2047,14 +2052,15 @@ class RelationshipProperty(StrategizedProperty):
                 return False
         return True
 
-    def _generate_backref(self):
+    def _generate_backref(self) -> None:
         """Interpret the 'backref' instruction to create a
-        :func:`.relationship` complementary to this one."""
+        :func:`_orm.relationship` complementary to this one."""
 
         if self.parent.non_primary:
             return
         if self.backref is not None and not self.back_populates:
-            if isinstance(self.backref, util.string_types):
+            kwargs: Dict[str, Any]
+            if isinstance(self.backref, str):
                 backref_key, kwargs = self.backref, {}
             else:
                 backref_key, kwargs = self.backref
@@ -2108,31 +2114,37 @@ class RelationshipProperty(StrategizedProperty):
             kwargs.setdefault("viewonly", self.viewonly)
             kwargs.setdefault("post_update", self.post_update)
             kwargs.setdefault("passive_updates", self.passive_updates)
+            kwargs.setdefault("sync_backref", self.sync_backref)
             self.back_populates = backref_key
             relationship = RelationshipProperty(
                 parent,
                 self.secondary,
-                pj,
-                sj,
+                primaryjoin=pj,
+                secondaryjoin=sj,
                 foreign_keys=foreign_keys,
                 back_populates=self.key,
-                **kwargs
+                **kwargs,
             )
-            mapper._configure_property(backref_key, relationship)
+            mapper._configure_property(
+                backref_key, relationship, warn_for_existing=True
+            )
 
         if self.back_populates:
             self._add_reverse_property(self.back_populates)
 
-    def _post_init(self):
+    @util.preload_module("sqlalchemy.orm.dependency")
+    def _post_init(self) -> None:
+        dependency = util.preloaded.orm_dependency
+
         if self.uselist is None:
             self.uselist = self.direction is not MANYTOONE
         if not self.viewonly:
-            self._dependency_processor = (
+            self._dependency_processor = (  # type: ignore
                 dependency.DependencyProcessor.from_relationship
             )(self)
 
     @util.memoized_property
-    def _use_get(self):
+    def _use_get(self) -> bool:
         """memoize the 'use_get' attribute of this RelationshipLoader's
         lazyloader."""
 
@@ -2140,37 +2152,65 @@ class RelationshipProperty(StrategizedProperty):
         return strategy.use_get
 
     @util.memoized_property
-    def _is_self_referential(self):
+    def _is_self_referential(self) -> bool:
         return self.mapper.common_parent(self.parent)
 
     def _create_joins(
         self,
-        source_polymorphic=False,
-        source_selectable=None,
-        dest_polymorphic=False,
-        dest_selectable=None,
-        of_type_mapper=None,
-    ):
+        source_polymorphic: bool = False,
+        source_selectable: Optional[FromClause] = None,
+        dest_selectable: Optional[FromClause] = None,
+        of_type_entity: Optional[_InternalEntityType[Any]] = None,
+        alias_secondary: bool = False,
+        extra_criteria: Tuple[ColumnElement[bool], ...] = (),
+    ) -> Tuple[
+        ColumnElement[bool],
+        Optional[ColumnElement[bool]],
+        FromClause,
+        FromClause,
+        Optional[FromClause],
+        Optional[ClauseAdapter],
+    ]:
+        aliased = False
+
+        if alias_secondary and self.secondary is not None:
+            aliased = True
+
         if source_selectable is None:
             if source_polymorphic and self.parent.with_polymorphic:
                 source_selectable = self.parent._with_polymorphic_selectable
 
-        aliased = False
+        if of_type_entity:
+            dest_mapper = of_type_entity.mapper
+            if dest_selectable is None:
+                dest_selectable = of_type_entity.selectable
+                aliased = True
+        else:
+            dest_mapper = self.mapper
+
         if dest_selectable is None:
             dest_selectable = self.entity.selectable
-            if dest_polymorphic and self.mapper.with_polymorphic:
+            if self.mapper.with_polymorphic:
                 aliased = True
 
             if self._is_self_referential and source_selectable is None:
-                dest_selectable = dest_selectable.alias()
+                dest_selectable = dest_selectable._anonymous_fromclause()
                 aliased = True
-        else:
+        elif (
+            dest_selectable is not self.mapper._with_polymorphic_selectable
+            or self.mapper.with_polymorphic
+        ):
             aliased = True
 
-        dest_mapper = of_type_mapper or self.mapper
-
         single_crit = dest_mapper._single_table_criterion
-        aliased = aliased or (source_selectable is not None)
+        aliased = aliased or (
+            source_selectable is not None
+            and (
+                source_selectable
+                is not self.parent._with_polymorphic_selectable
+                or source_selectable._is_subquery
+            )
+        )
 
         (
             primaryjoin,
@@ -2179,7 +2219,11 @@ class RelationshipProperty(StrategizedProperty):
             target_adapter,
             dest_selectable,
         ) = self._join_condition.join_targets(
-            source_selectable, dest_selectable, aliased, single_crit
+            source_selectable,
+            dest_selectable,
+            aliased,
+            single_crit,
+            extra_criteria,
         )
         if source_selectable is None:
             source_selectable = self.parent.local_table
@@ -2195,37 +2239,56 @@ class RelationshipProperty(StrategizedProperty):
         )
 
 
-def _annotate_columns(element, annotations):
-    def clone(elem):
+def _annotate_columns(element: _CE, annotations: _AnnotationDict) -> _CE:
+    def clone(elem: _CE) -> _CE:
         if isinstance(elem, expression.ColumnClause):
-            elem = elem._annotate(annotations.copy())
+            elem = elem._annotate(annotations.copy())  # type: ignore
         elem._copy_internals(clone=clone)
         return elem
 
     if element is not None:
         element = clone(element)
+    clone = None  # type: ignore # remove gc cycles
     return element
 
 
-class JoinCondition(object):
+class JoinCondition:
+    primaryjoin_initial: Optional[ColumnElement[bool]]
+    primaryjoin: ColumnElement[bool]
+    secondaryjoin: Optional[ColumnElement[bool]]
+    secondary: Optional[FromClause]
+    prop: RelationshipProperty[Any]
+
+    synchronize_pairs: _ColumnPairs
+    secondary_synchronize_pairs: _ColumnPairs
+    direction: RelationshipDirection
+
+    parent_persist_selectable: FromClause
+    child_persist_selectable: FromClause
+    parent_local_selectable: FromClause
+    child_local_selectable: FromClause
+
+    _local_remote_pairs: Optional[_ColumnPairs]
+
     def __init__(
         self,
-        parent_persist_selectable,
-        child_persist_selectable,
-        parent_local_selectable,
-        child_local_selectable,
-        primaryjoin=None,
-        secondary=None,
-        secondaryjoin=None,
-        parent_equivalents=None,
-        child_equivalents=None,
-        consider_as_foreign_keys=None,
-        local_remote_pairs=None,
-        remote_side=None,
-        self_referential=False,
-        prop=None,
-        support_sync=True,
-        can_be_synced_fn=lambda *c: True,
+        parent_persist_selectable: FromClause,
+        child_persist_selectable: FromClause,
+        parent_local_selectable: FromClause,
+        child_local_selectable: FromClause,
+        *,
+        primaryjoin: Optional[ColumnElement[bool]] = None,
+        secondary: Optional[FromClause] = None,
+        secondaryjoin: Optional[ColumnElement[bool]] = None,
+        parent_equivalents: Optional[_EquivalentColumnMap] = None,
+        child_equivalents: Optional[_EquivalentColumnMap] = None,
+        consider_as_foreign_keys: Any = None,
+        local_remote_pairs: Optional[_ColumnPairs] = None,
+        remote_side: Any = None,
+        self_referential: Any = False,
+        prop: RelationshipProperty[Any],
+        support_sync: bool = True,
+        can_be_synced_fn: Callable[..., bool] = lambda *c: True,
     ):
         self.parent_persist_selectable = parent_persist_selectable
         self.parent_local_selectable = parent_local_selectable
@@ -2233,7 +2296,7 @@ class JoinCondition(object):
         self.child_local_selectable = child_local_selectable
         self.parent_equivalents = parent_equivalents
         self.child_equivalents = child_equivalents
-        self.primaryjoin = primaryjoin
+        self.primaryjoin_initial = primaryjoin
         self.secondaryjoin = secondaryjoin
         self.secondary = secondary
         self.consider_as_foreign_keys = consider_as_foreign_keys
@@ -2243,7 +2306,10 @@ class JoinCondition(object):
         self.self_referential = self_referential
         self.support_sync = support_sync
         self.can_be_synced_fn = can_be_synced_fn
+
         self._determine_joins()
+        assert self.primaryjoin is not None
+
         self._sanitize_joins()
         self._annotate_fks()
         self._annotate_remote()
@@ -2257,9 +2323,7 @@ class JoinCondition(object):
         self._check_remote_side()
         self._log_joins()
 
-    def _log_joins(self):
-        if self.prop is None:
-            return
+    def _log_joins(self) -> None:
         log = self.prop.logger
         log.info("%s setup primary join %s", self.prop, self.primaryjoin)
         log.info("%s setup secondary join %s", self.prop, self.secondaryjoin)
@@ -2297,25 +2361,25 @@ class JoinCondition(object):
         )
         log.info("%s relationship direction %s", self.prop, self.direction)
 
-    def _sanitize_joins(self):
+    def _sanitize_joins(self) -> None:
         """remove the parententity annotation from our join conditions which
         can leak in here based on some declarative patterns and maybe others.
 
-        We'd want to remove "parentmapper" also, but apparently there's
-        an exotic use case in _join_fixture_inh_selfref_w_entity
+        "parentmapper" is relied upon both by the ORM evaluator as well as
+        the use case in _join_fixture_inh_selfref_w_entity
         that relies upon it being present, see :ticket:`3364`.
 
         """
 
         self.primaryjoin = _deep_deannotate(
-            self.primaryjoin, values=("parententity",)
+            self.primaryjoin, values=("parententity", "proxy_key")
         )
         if self.secondaryjoin is not None:
             self.secondaryjoin = _deep_deannotate(
-                self.secondaryjoin, values=("parententity",)
+                self.secondaryjoin, values=("parententity", "proxy_key")
             )
 
-    def _determine_joins(self):
+    def _determine_joins(self) -> None:
         """Determine the 'primaryjoin' and 'secondaryjoin' attributes,
         if not passed to the constructor already.
 
@@ -2345,22 +2409,26 @@ class JoinCondition(object):
                         a_subset=self.child_local_selectable,
                         consider_as_foreign_keys=consider_as_foreign_keys,
                     )
-                if self.primaryjoin is None:
+                if self.primaryjoin_initial is None:
                     self.primaryjoin = join_condition(
                         self.parent_persist_selectable,
                         self.secondary,
                         a_subset=self.parent_local_selectable,
                         consider_as_foreign_keys=consider_as_foreign_keys,
                     )
+                else:
+                    self.primaryjoin = self.primaryjoin_initial
             else:
-                if self.primaryjoin is None:
+                if self.primaryjoin_initial is None:
                     self.primaryjoin = join_condition(
                         self.parent_persist_selectable,
                         self.child_persist_selectable,
                         a_subset=self.parent_local_selectable,
                         consider_as_foreign_keys=consider_as_foreign_keys,
                     )
-        except sa_exc.NoForeignKeysError:
+                else:
+                    self.primaryjoin = self.primaryjoin_initial
+        except sa_exc.NoForeignKeysError as nfe:
             if self.secondary is not None:
                 raise sa_exc.NoForeignKeysError(
                     "Could not determine join "
@@ -2371,7 +2439,7 @@ class JoinCondition(object):
                     "with a ForeignKey or ForeignKeyConstraint, or "
                     "specify 'primaryjoin' and 'secondaryjoin' "
                     "expressions." % (self.prop, self.secondary)
-                )
+                ) from nfe
             else:
                 raise sa_exc.NoForeignKeysError(
                     "Could not determine join "
@@ -2381,8 +2449,8 @@ class JoinCondition(object):
                     "Ensure that referencing columns are associated "
                     "with a ForeignKey or ForeignKeyConstraint, or "
                     "specify a 'primaryjoin' expression." % self.prop
-                )
-        except sa_exc.AmbiguousForeignKeysError:
+                ) from nfe
+        except sa_exc.AmbiguousForeignKeysError as afe:
             if self.secondary is not None:
                 raise sa_exc.AmbiguousForeignKeysError(
                     "Could not determine join "
@@ -2394,7 +2462,7 @@ class JoinCondition(object):
                     "should be counted as containing a foreign key "
                     "reference from the secondary table to each of the "
                     "parent and child tables." % (self.prop, self.secondary)
-                )
+                ) from afe
             else:
                 raise sa_exc.AmbiguousForeignKeysError(
                     "Could not determine join "
@@ -2404,18 +2472,19 @@ class JoinCondition(object):
                     "'foreign_keys' argument, providing a list of those "
                     "columns which should be counted as containing a "
                     "foreign key reference to the parent table." % self.prop
-                )
+                ) from afe
 
     @property
-    def primaryjoin_minus_local(self):
+    def primaryjoin_minus_local(self) -> ColumnElement[bool]:
         return _deep_deannotate(self.primaryjoin, values=("local", "remote"))
 
     @property
-    def secondaryjoin_minus_local(self):
+    def secondaryjoin_minus_local(self) -> ColumnElement[bool]:
+        assert self.secondaryjoin is not None
         return _deep_deannotate(self.secondaryjoin, values=("local", "remote"))
 
     @util.memoized_property
-    def primaryjoin_reverse_remote(self):
+    def primaryjoin_reverse_remote(self) -> ColumnElement[bool]:
         """Return the primaryjoin condition suitable for the
         "reverse" direction.
 
@@ -2427,17 +2496,19 @@ class JoinCondition(object):
         """
         if self._has_remote_annotations:
 
-            def replace(element):
+            def replace(element: _CE, **kw: Any) -> Optional[_CE]:
                 if "remote" in element._annotations:
-                    v = element._annotations.copy()
+                    v = dict(element._annotations)
                     del v["remote"]
                     v["local"] = True
                     return element._with_annotations(v)
                 elif "local" in element._annotations:
-                    v = element._annotations.copy()
+                    v = dict(element._annotations)
                     del v["local"]
                     v["remote"] = True
                     return element._with_annotations(v)
+
+                return None
 
             return visitors.replacement_traverse(self.primaryjoin, {}, replace)
         else:
@@ -2449,7 +2520,7 @@ class JoinCondition(object):
             else:
                 return _deep_deannotate(self.primaryjoin)
 
-    def _has_annotation(self, clause, annotation):
+    def _has_annotation(self, clause: ClauseElement, annotation: str) -> bool:
         for col in visitors.iterate(clause, {}):
             if annotation in col._annotations:
                 return True
@@ -2457,14 +2528,14 @@ class JoinCondition(object):
             return False
 
     @util.memoized_property
-    def _has_foreign_annotations(self):
+    def _has_foreign_annotations(self) -> bool:
         return self._has_annotation(self.primaryjoin, "foreign")
 
     @util.memoized_property
-    def _has_remote_annotations(self):
+    def _has_remote_annotations(self) -> bool:
         return self._has_annotation(self.primaryjoin, "remote")
 
-    def _annotate_fks(self):
+    def _annotate_fks(self) -> None:
         """Annotate the primaryjoin and secondaryjoin
         structures with 'foreign' annotations marking columns
         considered as foreign.
@@ -2478,10 +2549,11 @@ class JoinCondition(object):
         else:
             self._annotate_present_fks()
 
-    def _annotate_from_fk_list(self):
-        def check_fk(col):
-            if col in self.consider_as_foreign_keys:
-                return col._annotate({"foreign": True})
+    def _annotate_from_fk_list(self) -> None:
+        def check_fk(element: _CE, **kw: Any) -> Optional[_CE]:
+            if element in self.consider_as_foreign_keys:
+                return element._annotate({"foreign": True})
+            return None
 
         self.primaryjoin = visitors.replacement_traverse(
             self.primaryjoin, {}, check_fk
@@ -2491,13 +2563,15 @@ class JoinCondition(object):
                 self.secondaryjoin, {}, check_fk
             )
 
-    def _annotate_present_fks(self):
+    def _annotate_present_fks(self) -> None:
         if self.secondary is not None:
             secondarycols = util.column_set(self.secondary.c)
         else:
             secondarycols = set()
 
-        def is_foreign(a, b):
+        def is_foreign(
+            a: ColumnElement[Any], b: ColumnElement[Any]
+        ) -> Optional[ColumnElement[Any]]:
             if isinstance(a, schema.Column) and isinstance(b, schema.Column):
                 if a.references(b):
                     return a
@@ -2510,7 +2584,9 @@ class JoinCondition(object):
                 elif b in secondarycols and a not in secondarycols:
                     return b
 
-        def visit_binary(binary):
+            return None
+
+        def visit_binary(binary: BinaryExpression[Any]) -> None:
             if not isinstance(
                 binary.left, sql.ColumnElement
             ) or not isinstance(binary.right, sql.ColumnElement):
@@ -2537,16 +2613,17 @@ class JoinCondition(object):
                 self.secondaryjoin, {}, {"binary": visit_binary}
             )
 
-    def _refers_to_parent_table(self):
+    def _refers_to_parent_table(self) -> bool:
         """Return True if the join condition contains column
         comparisons where both columns are in both tables.
 
         """
         pt = self.parent_persist_selectable
         mt = self.child_persist_selectable
-        result = [False]
+        result = False
 
-        def visit_binary(binary):
+        def visit_binary(binary: BinaryExpression[Any]) -> None:
+            nonlocal result
             c, f = binary.left, binary.right
             if (
                 isinstance(c, expression.ColumnClause)
@@ -2556,19 +2633,19 @@ class JoinCondition(object):
                 and mt.is_derived_from(c.table)
                 and mt.is_derived_from(f.table)
             ):
-                result[0] = True
+                result = True
 
         visitors.traverse(self.primaryjoin, {}, {"binary": visit_binary})
-        return result[0]
+        return result
 
-    def _tables_overlap(self):
+    def _tables_overlap(self) -> bool:
         """Return True if parent/child tables have some overlap."""
 
         return selectables_overlap(
             self.parent_persist_selectable, self.child_persist_selectable
         )
 
-    def _annotate_remote(self):
+    def _annotate_remote(self) -> None:
         """Annotate the primaryjoin and secondaryjoin
         structures with 'remote' annotations marking columns
         considered as part of the 'remote' side.
@@ -2590,30 +2667,38 @@ class JoinCondition(object):
         else:
             self._annotate_remote_distinct_selectables()
 
-    def _annotate_remote_secondary(self):
+    def _annotate_remote_secondary(self) -> None:
         """annotate 'remote' in primaryjoin, secondaryjoin
         when 'secondary' is present.
 
         """
 
-        def repl(element):
-            if self.secondary.c.contains_column(element):
+        assert self.secondary is not None
+        fixed_secondary = self.secondary
+
+        def repl(element: _CE, **kw: Any) -> Optional[_CE]:
+            if fixed_secondary.c.contains_column(element):
                 return element._annotate({"remote": True})
+            return None
 
         self.primaryjoin = visitors.replacement_traverse(
             self.primaryjoin, {}, repl
         )
+
+        assert self.secondaryjoin is not None
         self.secondaryjoin = visitors.replacement_traverse(
             self.secondaryjoin, {}, repl
         )
 
-    def _annotate_selfref(self, fn, remote_side_given):
+    def _annotate_selfref(
+        self, fn: Callable[[ColumnElement[Any]], bool], remote_side_given: bool
+    ) -> None:
         """annotate 'remote' in primaryjoin, secondaryjoin
         when the relationship is detected as self-referential.
 
         """
 
-        def visit_binary(binary):
+        def visit_binary(binary: BinaryExpression[Any]) -> None:
             equated = binary.left.compare(binary.right)
             if isinstance(binary.left, expression.ColumnClause) and isinstance(
                 binary.right, expression.ColumnClause
@@ -2630,7 +2715,7 @@ class JoinCondition(object):
             self.primaryjoin, {}, {"binary": visit_binary}
         )
 
-    def _annotate_remote_from_args(self):
+    def _annotate_remote_from_args(self) -> None:
         """annotate 'remote' in primaryjoin, secondaryjoin
         when the 'remote_side' or '_local_remote_pairs'
         arguments are used.
@@ -2652,15 +2737,18 @@ class JoinCondition(object):
             self._annotate_selfref(lambda col: col in remote_side, True)
         else:
 
-            def repl(element):
-                if element in remote_side:
+            def repl(element: _CE, **kw: Any) -> Optional[_CE]:
+                # use set() to avoid generating ``__eq__()`` expressions
+                # against each element
+                if element in set(remote_side):
                     return element._annotate({"remote": True})
+                return None
 
             self.primaryjoin = visitors.replacement_traverse(
                 self.primaryjoin, {}, repl
             )
 
-    def _annotate_remote_with_overlap(self):
+    def _annotate_remote_with_overlap(self) -> None:
         """annotate 'remote' in primaryjoin, secondaryjoin
         when the parent/child tables have some set of
         tables in common, though is not a fully self-referential
@@ -2668,7 +2756,7 @@ class JoinCondition(object):
 
         """
 
-        def visit_binary(binary):
+        def visit_binary(binary: BinaryExpression[Any]) -> None:
             binary.left, binary.right = proc_left_right(
                 binary.left, binary.right
             )
@@ -2680,7 +2768,9 @@ class JoinCondition(object):
             self.prop is not None and self.prop.mapper is not self.prop.parent
         )
 
-        def proc_left_right(left, right):
+        def proc_left_right(
+            left: ColumnElement[Any], right: ColumnElement[Any]
+        ) -> Tuple[ColumnElement[Any], ColumnElement[Any]]:
             if isinstance(left, expression.ColumnClause) and isinstance(
                 right, expression.ColumnClause
             ):
@@ -2707,32 +2797,33 @@ class JoinCondition(object):
             self.primaryjoin, {}, {"binary": visit_binary}
         )
 
-    def _annotate_remote_distinct_selectables(self):
+    def _annotate_remote_distinct_selectables(self) -> None:
         """annotate 'remote' in primaryjoin, secondaryjoin
         when the parent/child tables are entirely
         separate.
 
         """
 
-        def repl(element):
+        def repl(element: _CE, **kw: Any) -> Optional[_CE]:
             if self.child_persist_selectable.c.contains_column(element) and (
                 not self.parent_local_selectable.c.contains_column(element)
                 or self.child_local_selectable.c.contains_column(element)
             ):
                 return element._annotate({"remote": True})
+            return None
 
         self.primaryjoin = visitors.replacement_traverse(
             self.primaryjoin, {}, repl
         )
 
-    def _warn_non_column_elements(self):
+    def _warn_non_column_elements(self) -> None:
         util.warn(
             "Non-simple column elements in primary "
             "join condition for property %s - consider using "
             "remote() annotations to mark the remote side." % self.prop
         )
 
-    def _annotate_local(self):
+    def _annotate_local(self) -> None:
         """Annotate the primaryjoin and secondaryjoin
         structures with 'local' annotations.
 
@@ -2753,29 +2844,28 @@ class JoinCondition(object):
         else:
             local_side = util.column_set(self.parent_persist_selectable.c)
 
-        def locals_(elem):
-            if "remote" not in elem._annotations and elem in local_side:
-                return elem._annotate({"local": True})
+        def locals_(element: _CE, **kw: Any) -> Optional[_CE]:
+            if "remote" not in element._annotations and element in local_side:
+                return element._annotate({"local": True})
+            return None
 
         self.primaryjoin = visitors.replacement_traverse(
             self.primaryjoin, {}, locals_
         )
 
-    def _annotate_parentmapper(self):
-        if self.prop is None:
-            return
-
-        def parentmappers_(elem):
-            if "remote" in elem._annotations:
-                return elem._annotate({"parentmapper": self.prop.mapper})
-            elif "local" in elem._annotations:
-                return elem._annotate({"parentmapper": self.prop.parent})
+    def _annotate_parentmapper(self) -> None:
+        def parentmappers_(element: _CE, **kw: Any) -> Optional[_CE]:
+            if "remote" in element._annotations:
+                return element._annotate({"parentmapper": self.prop.mapper})
+            elif "local" in element._annotations:
+                return element._annotate({"parentmapper": self.prop.parent})
+            return None
 
         self.primaryjoin = visitors.replacement_traverse(
             self.primaryjoin, {}, parentmappers_
         )
 
-    def _check_remote_side(self):
+    def _check_remote_side(self) -> None:
         if not self.local_remote_pairs:
             raise sa_exc.ArgumentError(
                 "Relationship %s could "
@@ -2787,8 +2877,25 @@ class JoinCondition(object):
                 "condition that are on the remote side of "
                 "the relationship." % (self.prop,)
             )
+        else:
+            not_target = util.column_set(
+                self.parent_persist_selectable.c
+            ).difference(self.child_persist_selectable.c)
 
-    def _check_foreign_cols(self, join_condition, primary):
+            for _, rmt in self.local_remote_pairs:
+                if rmt in not_target:
+                    util.warn(
+                        "Expression %s is marked as 'remote', but these "
+                        "column(s) are local to the local side.  The "
+                        "remote() annotation is needed only for a "
+                        "self-referential relationship where both sides "
+                        "of the relationship refer to the same tables."
+                        % (rmt,)
+                    )
+
+    def _check_foreign_cols(
+        self, join_condition: ColumnElement[bool], primary: bool
+    ) -> None:
         """Check the foreign key columns collected and emit error
         messages."""
 
@@ -2854,7 +2961,7 @@ class JoinCondition(object):
             )
             raise sa_exc.ArgumentError(err)
 
-    def _determine_direction(self):
+    def _determine_direction(self) -> None:
         """Determine if this relationship is one to many, many to one,
         many to many.
 
@@ -2887,15 +2994,13 @@ class JoinCondition(object):
 
                 # 2. columns that are FK but are not remote (e.g. local)
                 # suggest manytoone.
-                manytoone_local = set(
-                    [
-                        c
-                        for c in self._gather_columns_with_annotation(
-                            self.primaryjoin, "foreign"
-                        )
-                        if "remote" not in c._annotations
-                    ]
-                )
+                manytoone_local = {
+                    c
+                    for c in self._gather_columns_with_annotation(
+                        self.primaryjoin, "foreign"
+                    )
+                    if "remote" not in c._annotations
+                }
 
                 # 3. if both collections are present, remove columns that
                 # refer to themselves.  This is for the case of
@@ -2938,7 +3043,9 @@ class JoinCondition(object):
                     "nor the child's mapped tables" % self.prop
                 )
 
-    def _deannotate_pairs(self, collection):
+    def _deannotate_pairs(
+        self, collection: _ColumnPairIterable
+    ) -> _MutableColumnPairs:
         """provide deannotation for the various lists of
         pairs, so that using them in hashes doesn't incur
         high-overhead __eq__() comparisons against
@@ -2947,13 +3054,22 @@ class JoinCondition(object):
         """
         return [(x._deannotate(), y._deannotate()) for x, y in collection]
 
-    def _setup_pairs(self):
-        sync_pairs = []
-        lrp = util.OrderedSet([])
-        secondary_sync_pairs = []
+    def _setup_pairs(self) -> None:
+        sync_pairs: _MutableColumnPairs = []
+        lrp: util.OrderedSet[Tuple[ColumnElement[Any], ColumnElement[Any]]] = (
+            util.OrderedSet([])
+        )
+        secondary_sync_pairs: _MutableColumnPairs = []
 
-        def go(joincond, collection):
-            def visit_binary(binary, left, right):
+        def go(
+            joincond: ColumnElement[bool],
+            collection: _MutableColumnPairs,
+        ) -> None:
+            def visit_binary(
+                binary: BinaryExpression[Any],
+                left: ColumnElement[Any],
+                right: ColumnElement[Any],
+            ) -> None:
                 if (
                     "remote" in right._annotations
                     and "remote" not in left._annotations
@@ -2990,9 +3106,14 @@ class JoinCondition(object):
             secondary_sync_pairs
         )
 
-    _track_overlapping_sync_targets = weakref.WeakKeyDictionary()
+    _track_overlapping_sync_targets: weakref.WeakKeyDictionary[
+        ColumnElement[Any],
+        weakref.WeakKeyDictionary[
+            RelationshipProperty[Any], ColumnElement[Any]
+        ],
+    ] = weakref.WeakKeyDictionary()
 
-    def _warn_for_conflicting_sync_targets(self):
+    def _warn_for_conflicting_sync_targets(self) -> None:
         if not self.support_sync:
             return
 
@@ -3012,63 +3133,87 @@ class JoinCondition(object):
             # if multiple relationships overlap foreign() directly, but
             # we're going to assume it's typically a ForeignKeyConstraint-
             # level configuration that benefits from this warning.
-            if len(to_.foreign_keys) < 2:
-                continue
 
             if to_ not in self._track_overlapping_sync_targets:
-                self._track_overlapping_sync_targets[
-                    to_
-                ] = weakref.WeakKeyDictionary({self.prop: from_})
+                self._track_overlapping_sync_targets[to_] = (
+                    weakref.WeakKeyDictionary({self.prop: from_})
+                )
             else:
                 other_props = []
                 prop_to_from = self._track_overlapping_sync_targets[to_]
 
                 for pr, fr_ in prop_to_from.items():
                     if (
-                        pr.mapper in mapperlib._mapper_registry
-                        and (
-                            self.prop._persists_for(pr.parent)
-                            or pr._persists_for(self.prop.parent)
-                        )
-                        and fr_ is not from_
+                        not pr.mapper._dispose_called
                         and pr not in self.prop._reverse_property
+                        and pr.key not in self.prop._overlaps
+                        and self.prop.key not in pr._overlaps
+                        # note: the "__*" symbol is used internally by
+                        # SQLAlchemy as a general means of suppressing the
+                        # overlaps warning for some extension cases, however
+                        # this is not currently
+                        # a publicly supported symbol and may change at
+                        # any time.
+                        and "__*" not in self.prop._overlaps
+                        and "__*" not in pr._overlaps
+                        and not self.prop.parent.is_sibling(pr.parent)
+                        and not self.prop.mapper.is_sibling(pr.mapper)
+                        and not self.prop.parent.is_sibling(pr.mapper)
+                        and not self.prop.mapper.is_sibling(pr.parent)
+                        and (
+                            self.prop.key != pr.key
+                            or not self.prop.parent.common_parent(pr.parent)
+                        )
                     ):
-
                         other_props.append((pr, fr_))
 
                 if other_props:
                     util.warn(
                         "relationship '%s' will copy column %s to column %s, "
                         "which conflicts with relationship(s): %s. "
-                        "Consider applying "
-                        "viewonly=True to read-only relationships, or provide "
-                        "a primaryjoin condition marking writable columns "
-                        "with the foreign() annotation."
+                        "If this is not the intention, consider if these "
+                        "relationships should be linked with "
+                        "back_populates, or if viewonly=True should be "
+                        "applied to one or more if they are read-only. "
+                        "For the less common case that foreign key "
+                        "constraints are partially overlapping, the "
+                        "orm.foreign() "
+                        "annotation can be used to isolate the columns that "
+                        "should be written towards.   To silence this "
+                        "warning, add the parameter 'overlaps=\"%s\"' to the "
+                        "'%s' relationship."
                         % (
                             self.prop,
                             from_,
                             to_,
                             ", ".join(
-                                "'%s' (copies %s to %s)" % (pr, fr_, to_)
-                                for (pr, fr_) in other_props
+                                sorted(
+                                    "'%s' (copies %s to %s)" % (pr, fr_, to_)
+                                    for (pr, fr_) in other_props
+                                )
                             ),
-                        )
+                            ",".join(sorted(pr.key for pr, fr in other_props)),
+                            self.prop,
+                        ),
+                        code="qzyx",
                     )
                 self._track_overlapping_sync_targets[to_][self.prop] = from_
 
     @util.memoized_property
-    def remote_columns(self):
+    def remote_columns(self) -> Set[ColumnElement[Any]]:
         return self._gather_join_annotations("remote")
 
     @util.memoized_property
-    def local_columns(self):
+    def local_columns(self) -> Set[ColumnElement[Any]]:
         return self._gather_join_annotations("local")
 
     @util.memoized_property
-    def foreign_key_columns(self):
+    def foreign_key_columns(self) -> Set[ColumnElement[Any]]:
         return self._gather_join_annotations("foreign")
 
-    def _gather_join_annotations(self, annotation):
+    def _gather_join_annotations(
+        self, annotation: str
+    ) -> Set[ColumnElement[Any]]:
         s = set(
             self._gather_columns_with_annotation(self.primaryjoin, annotation)
         )
@@ -3080,19 +3225,39 @@ class JoinCondition(object):
             )
         return {x._deannotate() for x in s}
 
-    def _gather_columns_with_annotation(self, clause, *annotation):
-        annotation = set(annotation)
-        return set(
-            [
-                col
-                for col in visitors.iterate(clause, {})
-                if annotation.issubset(col._annotations)
-            ]
-        )
+    def _gather_columns_with_annotation(
+        self, clause: ColumnElement[Any], *annotation: Iterable[str]
+    ) -> Set[ColumnElement[Any]]:
+        annotation_set = set(annotation)
+        return {
+            cast(ColumnElement[Any], col)
+            for col in visitors.iterate(clause, {})
+            if annotation_set.issubset(col._annotations)
+        }
+
+    @util.memoized_property
+    def _secondary_lineage_set(self) -> FrozenSet[ColumnElement[Any]]:
+        if self.secondary is not None:
+            return frozenset(
+                itertools.chain(*[c.proxy_set for c in self.secondary.c])
+            )
+        else:
+            return util.EMPTY_SET
 
     def join_targets(
-        self, source_selectable, dest_selectable, aliased, single_crit=None
-    ):
+        self,
+        source_selectable: Optional[FromClause],
+        dest_selectable: FromClause,
+        aliased: bool,
+        single_crit: Optional[ColumnElement[bool]] = None,
+        extra_criteria: Tuple[ColumnElement[bool], ...] = (),
+    ) -> Tuple[
+        ColumnElement[bool],
+        Optional[ColumnElement[bool]],
+        Optional[FromClause],
+        Optional[ClauseAdapter],
+        FromClause,
+    ]:
         """Given a source and destination selectable, create a
         join between them.
 
@@ -3102,7 +3267,6 @@ class JoinCondition(object):
         criterion, equivalent column sets, etc.
 
         """
-
         # place a barrier on the destination such that
         # replacement traversals won't ever dig into it.
         # its internal structure remains fixed
@@ -3128,32 +3292,79 @@ class JoinCondition(object):
             else:
                 primaryjoin = primaryjoin & single_crit
 
+        if extra_criteria:
+
+            def mark_exclude_cols(
+                elem: SupportsAnnotations, annotations: _AnnotationDict
+            ) -> SupportsAnnotations:
+                """note unrelated columns in the "extra criteria" as either
+                should be adapted or not adapted, even though they are not
+                part of our "local" or "remote" side.
+
+                see #9779 for this case, as well as #11010 for a follow up
+
+                """
+
+                parentmapper_for_element = elem._annotations.get(
+                    "parentmapper", None
+                )
+
+                if (
+                    parentmapper_for_element is not self.prop.parent
+                    and parentmapper_for_element is not self.prop.mapper
+                    and elem not in self._secondary_lineage_set
+                ):
+                    return _safe_annotate(elem, annotations)
+                else:
+                    return elem
+
+            extra_criteria = tuple(
+                _deep_annotate(
+                    elem,
+                    {"should_not_adapt": True},
+                    annotate_callable=mark_exclude_cols,
+                )
+                for elem in extra_criteria
+            )
+
+            if secondaryjoin is not None:
+                secondaryjoin = secondaryjoin & sql.and_(*extra_criteria)
+            else:
+                primaryjoin = primaryjoin & sql.and_(*extra_criteria)
+
         if aliased:
             if secondary is not None:
-                secondary = secondary.alias(flat=True)
-                primary_aliasizer = ClauseAdapter(secondary)
+                secondary = secondary._anonymous_fromclause(flat=True)
+                primary_aliasizer = ClauseAdapter(
+                    secondary,
+                    exclude_fn=_local_col_exclude,
+                )
                 secondary_aliasizer = ClauseAdapter(
                     dest_selectable, equivalents=self.child_equivalents
                 ).chain(primary_aliasizer)
                 if source_selectable is not None:
-                    primary_aliasizer = ClauseAdapter(secondary).chain(
+                    primary_aliasizer = ClauseAdapter(
+                        secondary,
+                        exclude_fn=_local_col_exclude,
+                    ).chain(
                         ClauseAdapter(
                             source_selectable,
                             equivalents=self.parent_equivalents,
                         )
                     )
+
                 secondaryjoin = secondary_aliasizer.traverse(secondaryjoin)
             else:
                 primary_aliasizer = ClauseAdapter(
                     dest_selectable,
-                    exclude_fn=_ColInAnnotations("local"),
+                    exclude_fn=_local_col_exclude,
                     equivalents=self.child_equivalents,
                 )
                 if source_selectable is not None:
                     primary_aliasizer.chain(
                         ClauseAdapter(
                             source_selectable,
-                            exclude_fn=_ColInAnnotations("remote"),
+                            exclude_fn=_remote_col_exclude,
                             equivalents=self.parent_equivalents,
                         )
                     )
@@ -3172,9 +3383,13 @@ class JoinCondition(object):
             dest_selectable,
         )
 
-    def create_lazy_clause(self, reverse_direction=False):
-        binds = util.column_dict()
-        equated_columns = util.column_dict()
+    def create_lazy_clause(self, reverse_direction: bool = False) -> Tuple[
+        ColumnElement[bool],
+        Dict[str, ColumnElement[Any]],
+        Dict[ColumnElement[Any], ColumnElement[Any]],
+    ]:
+        binds: Dict[ColumnElement[Any], BindParameter[Any]] = {}
+        equated_columns: Dict[ColumnElement[Any], ColumnElement[Any]] = {}
 
         has_secondary = self.secondaryjoin is not None
 
@@ -3190,21 +3405,22 @@ class JoinCondition(object):
             for l, r in self.local_remote_pairs:
                 equated_columns[l] = r
 
-        def col_to_bind(col):
-
+        def col_to_bind(
+            element: ColumnElement[Any], **kw: Any
+        ) -> Optional[BindParameter[Any]]:
             if (
-                (not reverse_direction and "local" in col._annotations)
+                (not reverse_direction and "local" in element._annotations)
                 or reverse_direction
                 and (
-                    (has_secondary and col in lookup)
-                    or (not has_secondary and "remote" in col._annotations)
+                    (has_secondary and element in lookup)
+                    or (not has_secondary and "remote" in element._annotations)
                 )
             ):
-                if col not in binds:
-                    binds[col] = sql.bindparam(
-                        None, None, type_=col.type, unique=True
+                if element not in binds:
+                    binds[element] = sql.bindparam(
+                        None, None, type_=element.type, unique=True
                     )
-                return binds[col]
+                return binds[element]
             return None
 
         lazywhere = self.primaryjoin
@@ -3226,14 +3442,59 @@ class JoinCondition(object):
         return lazywhere, bind_to_col, equated_columns
 
 
-class _ColInAnnotations(object):
-    """Seralizable equivalent to:
+class _ColInAnnotations:
+    """Serializable object that tests for names in c._annotations.
 
-        lambda c: "name" in c._annotations
+    TODO: does this need to be serializable anymore?  can we find what the
+    use case was for that?
+
     """
 
-    def __init__(self, name):
-        self.name = name
+    __slots__ = ("names",)
 
-    def __call__(self, c):
-        return self.name in c._annotations
+    def __init__(self, *names: str):
+        self.names = frozenset(names)
+
+    def __call__(self, c: ClauseElement) -> bool:
+        return bool(self.names.intersection(c._annotations))
+
+
+_local_col_exclude = _ColInAnnotations("local", "should_not_adapt")
+_remote_col_exclude = _ColInAnnotations("remote", "should_not_adapt")
+
+
+class Relationship(
+    RelationshipProperty[_T],
+    _DeclarativeMapped[_T],
+):
+    """Describes an object property that holds a single item or list
+    of items that correspond to a related database table.
+
+    Public constructor is the :func:`_orm.relationship` function.
+
+    .. seealso::
+
+        :ref:`relationship_config_toplevel`
+
+    .. versionchanged:: 2.0 Added :class:`_orm.Relationship` as a Declarative
+       compatible subclass for :class:`_orm.RelationshipProperty`.
+
+    """
+
+    inherit_cache = True
+    """:meta private:"""
+
+
+class _RelationshipDeclared(  # type: ignore[misc]
+    Relationship[_T],
+    WriteOnlyMapped[_T],  # not compatible with Mapped[_T]
+    DynamicMapped[_T],  # not compatible with Mapped[_T]
+):
+    """Relationship subclass used implicitly for declarative mapping."""
+
+    inherit_cache = True
+    """:meta private:"""
+
+    @classmethod
+    def _mapper_property_name(cls) -> str:
+        return "Relationship"

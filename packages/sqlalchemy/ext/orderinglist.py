@@ -1,9 +1,10 @@
 # ext/orderinglist.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
 
 """A custom list that manages index/position information for contained
 elements.
@@ -11,7 +12,7 @@ elements.
 :author: Jason Kirtland
 
 ``orderinglist`` is a helper for mutable ordered relationships.  It will
-intercept list operations performed on a :func:`.relationship`-managed
+intercept list operations performed on a :func:`_orm.relationship`-managed
 collection and
 automatically synchronize changes in list position onto a target scalar
 attribute.
@@ -86,7 +87,7 @@ With the above mapping the ``Bullet.position`` attribute is managed::
 The :class:`.OrderingList` construct only works with **changes** to a
 collection, and not the initial load from the database, and requires that the
 list be sorted when loaded.  Therefore, be sure to specify ``order_by`` on the
-:func:`.relationship` against the target ordering attribute, so that the
+:func:`_orm.relationship` against the target ordering attribute, so that the
 ordering is correct when first loaded.
 
 .. warning::
@@ -119,15 +120,30 @@ start numbering at 1 or some other integer, provide ``count_from=1``.
 
 
 """
-from .. import util
+from __future__ import annotations
+
+from typing import Callable
+from typing import List
+from typing import Optional
+from typing import Sequence
+from typing import TypeVar
+
 from ..orm.collections import collection
 from ..orm.collections import collection_adapter
+
+_T = TypeVar("_T")
+OrderingFunc = Callable[[int, Sequence[_T]], int]
 
 
 __all__ = ["ordering_list"]
 
 
-def ordering_list(attr, count_from=None, **kw):
+def ordering_list(
+    attr: str,
+    count_from: Optional[int] = None,
+    ordering_func: Optional[OrderingFunc] = None,
+    reorder_on_append: bool = False,
+) -> Callable[[], OrderingList]:
     """Prepares an :class:`OrderingList` factory for use in mapper definitions.
 
     Returns an object suitable for use as an argument to a Mapper
@@ -158,7 +174,11 @@ def ordering_list(attr, count_from=None, **kw):
 
     """
 
-    kw = _unsugar_count_from(count_from=count_from, **kw)
+    kw = _unsugar_count_from(
+        count_from=count_from,
+        ordering_func=ordering_func,
+        reorder_on_append=reorder_on_append,
+    )
     return lambda: OrderingList(attr, **kw)
 
 
@@ -208,17 +228,24 @@ def _unsugar_count_from(**kw):
     return kw
 
 
-class OrderingList(list):
+class OrderingList(List[_T]):
     """A custom list that manages position information for its children.
 
     The :class:`.OrderingList` object is normally set up using the
     :func:`.ordering_list` factory function, used in conjunction with
-    the :func:`.relationship` function.
+    the :func:`_orm.relationship` function.
 
     """
 
+    ordering_attr: str
+    ordering_func: OrderingFunc
+    reorder_on_append: bool
+
     def __init__(
-        self, ordering_attr=None, ordering_func=None, reorder_on_append=False
+        self,
+        ordering_attr: Optional[str] = None,
+        ordering_func: Optional[OrderingFunc] = None,
+        reorder_on_append: bool = False,
     ):
         """A custom list that manages position information for its children.
 
@@ -283,7 +310,7 @@ class OrderingList(list):
     def _set_order_value(self, entity, value):
         setattr(entity, self.ordering_attr, value)
 
-    def reorder(self):
+    def reorder(self) -> None:
         """Synchronize ordering for the entire collection.
 
         Sweeps through the list and ensures that each object has accurate
@@ -308,29 +335,29 @@ class OrderingList(list):
             self._set_order_value(entity, should_be)
 
     def append(self, entity):
-        super(OrderingList, self).append(entity)
+        super().append(entity)
         self._order_entity(len(self) - 1, entity, self.reorder_on_append)
 
     def _raw_append(self, entity):
         """Append without any ordering behavior."""
 
-        super(OrderingList, self).append(entity)
+        super().append(entity)
 
     _raw_append = collection.adds(1)(_raw_append)
 
     def insert(self, index, entity):
-        super(OrderingList, self).insert(index, entity)
+        super().insert(index, entity)
         self._reorder()
 
     def remove(self, entity):
-        super(OrderingList, self).remove(entity)
+        super().remove(entity)
 
         adapter = collection_adapter(self)
         if adapter and adapter._referenced_by_owner:
             self._reorder()
 
     def pop(self, index=-1):
-        entity = super(OrderingList, self).pop(index)
+        entity = super().pop(index)
         self._reorder()
         return entity
 
@@ -348,18 +375,18 @@ class OrderingList(list):
                 self.__setitem__(i, entity[i])
         else:
             self._order_entity(index, entity, True)
-            super(OrderingList, self).__setitem__(index, entity)
+            super().__setitem__(index, entity)
 
     def __delitem__(self, index):
-        super(OrderingList, self).__delitem__(index)
+        super().__delitem__(index)
         self._reorder()
 
     def __setslice__(self, start, end, values):
-        super(OrderingList, self).__setslice__(start, end, values)
+        super().__setslice__(start, end, values)
         self._reorder()
 
     def __delslice__(self, start, end):
-        super(OrderingList, self).__delslice__(start, end)
+        super().__delslice__(start, end)
         self._reorder()
 
     def __reduce__(self):
@@ -367,7 +394,7 @@ class OrderingList(list):
 
     for func_name, func in list(locals().items()):
         if (
-            util.callable(func)
+            callable(func)
             and func.__name__ == func_name
             and not func.__doc__
             and hasattr(list, func_name)
@@ -377,7 +404,7 @@ class OrderingList(list):
 
 
 def _reconstitute(cls, dict_, items):
-    """ Reconstitute an :class:`.OrderingList`.
+    """Reconstitute an :class:`.OrderingList`.
 
     This is the adjoint to :meth:`.OrderingList.__reduce__`.  It is used for
     unpickling :class:`.OrderingList` objects.

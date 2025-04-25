@@ -20,7 +20,7 @@ calibre-debug -g &
 sleep 2
 
 while [ 1 ] ; do
-	fswatch -v -0 -1 ./*.py ./ibooks_api/*.py
+	fswatch -v -0 -1 ./*.py ./ibooks_api/*.py ./requirements.txt
 	while [ `ps -ef | grep calibre-debug | grep -v grep | wc -l ` != "0" ]; do
 		calibre-debug -s 
 		sleep 1

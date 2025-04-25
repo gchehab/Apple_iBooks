@@ -1,9 +1,11 @@
-# mysql/cymysql.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# dialects/mysql/cymysql.py
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
+
 r"""
 
 .. dialect:: mysql+cymysql
@@ -11,6 +13,12 @@ r"""
     :dbapi: cymysql
     :connectstring: mysql+cymysql://<username>:<password>@<host>/<dbname>[?<options>]
     :url: https://github.com/nakagami/CyMySQL
+
+.. note::
+
+    The CyMySQL dialect is **not tested as part of SQLAlchemy's continuous
+    integration** and may have unresolved issues.  The recommended MySQL
+    dialects are mysqlclient and PyMySQL.
 
 """  # noqa
 
@@ -22,13 +30,12 @@ from ... import util
 
 class _cymysqlBIT(BIT):
     def result_processor(self, dialect, coltype):
-        """Convert a MySQL's 64 bit, variable length binary string to a long.
-        """
+        """Convert MySQL's 64 bit, variable length binary string to a long."""
 
         def process(value):
             if value is not None:
                 v = 0
-                for i in util.iterbytes(value):
+                for i in iter(value):
                     v = v << 8 | i
                 return v
             return value
@@ -38,6 +45,7 @@ class _cymysqlBIT(BIT):
 
 class MySQLDialect_cymysql(MySQLDialect_mysqldb):
     driver = "cymysql"
+    supports_statement_cache = True
 
     description_encoding = None
     supports_sane_rowcount = True
@@ -47,7 +55,7 @@ class MySQLDialect_cymysql(MySQLDialect_mysqldb):
     colspecs = util.update_copy(MySQLDialect.colspecs, {BIT: _cymysqlBIT})
 
     @classmethod
-    def dbapi(cls):
+    def import_dbapi(cls):
         return __import__("cymysql")
 
     def _detect_charset(self, connection):

@@ -1,404 +1,301 @@
 # util/compat.py
-# Copyright (C) 2005-2019 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: allow-untyped-defs, allow-untyped-calls
 
 """Handle Python version/platform incompatibilities."""
 
-import collections
-import contextlib
+from __future__ import annotations
+
+import base64
+import dataclasses
+import hashlib
+import inspect
 import operator
+import platform
 import sys
-import time
+import typing
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import Iterable
+from typing import List
+from typing import Mapping
+from typing import Optional
+from typing import Sequence
+from typing import Set
+from typing import Tuple
+from typing import Type
+from typing import TypeVar
 
 
-py36 = sys.version_info >= (3, 6)
-py33 = sys.version_info >= (3, 3)
-py35 = sys.version_info >= (3, 5)
-py32 = sys.version_info >= (3, 2)
-py3k = sys.version_info >= (3, 0)
-py2k = sys.version_info < (3, 0)
-py265 = sys.version_info >= (2, 6, 5)
-jython = sys.platform.startswith("java")
-pypy = hasattr(sys, "pypy_version_info")
+py313 = sys.version_info >= (3, 13)
+py312 = sys.version_info >= (3, 12)
+py311 = sys.version_info >= (3, 11)
+py310 = sys.version_info >= (3, 10)
+py39 = sys.version_info >= (3, 9)
+py38 = sys.version_info >= (3, 8)
+pypy = platform.python_implementation() == "PyPy"
+cpython = platform.python_implementation() == "CPython"
+
 win32 = sys.platform.startswith("win")
-cpython = not pypy and not jython  # TODO: something better for this ?
+osx = sys.platform.startswith("darwin")
+arm = "aarch" in platform.machine().lower()
+is64bit = sys.maxsize > 2**32
 
-contextmanager = contextlib.contextmanager
+has_refcount_gc = bool(cpython)
+
 dottedgetter = operator.attrgetter
-namedtuple = collections.namedtuple
-next = next  # noqa
 
-FullArgSpec = collections.namedtuple(
-    "FullArgSpec",
-    [
-        "args",
-        "varargs",
-        "varkw",
-        "defaults",
-        "kwonlyargs",
-        "kwonlydefaults",
-        "annotations",
-    ],
-)
-
-FullArgSpec = collections.namedtuple(
-    "FullArgSpec",
-    [
-        "args",
-        "varargs",
-        "varkw",
-        "defaults",
-        "kwonlyargs",
-        "kwonlydefaults",
-        "annotations",
-    ],
-)
-
-try:
-    import threading
-except ImportError:
-    import dummy_threading as threading  # noqa
+_T_co = TypeVar("_T_co", covariant=True)
 
 
-# work around http://bugs.python.org/issue2646
-if py265:
-    safe_kwarg = lambda arg: arg  # noqa
-else:
-    safe_kwarg = str
+class FullArgSpec(typing.NamedTuple):
+    args: List[str]
+    varargs: Optional[str]
+    varkw: Optional[str]
+    defaults: Optional[Tuple[Any, ...]]
+    kwonlyargs: List[str]
+    kwonlydefaults: Optional[Dict[str, Any]]
+    annotations: Dict[str, Any]
 
 
-if py3k:
-    import base64
-    import builtins
-    import configparser
-    import itertools
-    import pickle
+def inspect_getfullargspec(func: Callable[..., Any]) -> FullArgSpec:
+    """Fully vendored version of getfullargspec from Python 3.3."""
 
-    from functools import reduce
-    from inspect import getfullargspec as inspect_getfullargspec
-    from io import BytesIO as byte_buffer
-    from io import StringIO
-    from itertools import zip_longest
-    from urllib.parse import (
-        quote_plus,
-        unquote_plus,
-        parse_qsl,
-        quote,
-        unquote,
-    )
+    if inspect.ismethod(func):
+        func = func.__func__
+    if not inspect.isfunction(func):
+        raise TypeError(f"{func!r} is not a Python function")
 
-    string_types = (str,)
-    binary_types = (bytes,)
-    binary_type = bytes
-    text_type = str
-    int_types = (int,)
-    iterbytes = iter
+    co = func.__code__
+    if not inspect.iscode(co):
+        raise TypeError(f"{co!r} is not a code object")
 
-    itertools_filterfalse = itertools.filterfalse
-    itertools_filter = filter
-    itertools_imap = map
+    nargs = co.co_argcount
+    names = co.co_varnames
+    nkwargs = co.co_kwonlyargcount
+    args = list(names[:nargs])
+    kwonlyargs = list(names[nargs : nargs + nkwargs])
 
-    exec_ = getattr(builtins, "exec")
-    import_ = getattr(builtins, "__import__")
-    print_ = getattr(builtins, "print")
+    nargs += nkwargs
+    varargs = None
+    if co.co_flags & inspect.CO_VARARGS:
+        varargs = co.co_varnames[nargs]
+        nargs = nargs + 1
+    varkw = None
+    if co.co_flags & inspect.CO_VARKEYWORDS:
+        varkw = co.co_varnames[nargs]
 
-    def b(s):
-        return s.encode("latin-1")
-
-    def b64decode(x):
-        return base64.b64decode(x.encode("ascii"))
-
-    def b64encode(x):
-        return base64.b64encode(x).decode("ascii")
-
-    def decode_backslashreplace(text, encoding):
-        return text.decode(encoding, errors="backslashreplace")
-
-    def cmp(a, b):
-        return (a > b) - (a < b)
-
-    def reraise(tp, value, tb=None, cause=None):
-        if cause is not None:
-            assert cause is not value, "Same cause emitted"
-            value.__cause__ = cause
-        if value.__traceback__ is not tb:
-            raise value.with_traceback(tb)
-        raise value
-
-    def u(s):
-        return s
-
-    def ue(s):
-        return s
-
-    if py32:
-        callable = callable  # noqa
-    else:
-
-        def callable(fn):  # noqa
-            return hasattr(fn, "__call__")
-
-
-else:
-    import base64
-    import ConfigParser as configparser  # noqa
-    import itertools
-
-    from StringIO import StringIO  # noqa
-    from cStringIO import StringIO as byte_buffer  # noqa
-    from inspect import getargspec as _getargspec
-    from itertools import izip_longest as zip_longest  # noqa
-    from urllib import quote  # noqa
-    from urllib import quote_plus  # noqa
-    from urllib import unquote  # noqa
-    from urllib import unquote_plus  # noqa
-    from urlparse import parse_qsl  # noqa
-
-    try:
-        import cPickle as pickle
-    except ImportError:
-        import pickle  # noqa
-
-    string_types = (basestring,)  # noqa
-    binary_types = (bytes,)
-    binary_type = str
-    text_type = unicode  # noqa
-    int_types = int, long  # noqa
-
-    def inspect_getfullargspec(func):
-        return FullArgSpec(*_getargspec(func)[0:4] + ([], None, {}))
-
-    callable = callable  # noqa
-    cmp = cmp  # noqa
-    reduce = reduce  # noqa
-
-    b64encode = base64.b64encode
-    b64decode = base64.b64decode
-
-    itertools_filterfalse = itertools.ifilterfalse
-    itertools_filter = itertools.ifilter
-    itertools_imap = itertools.imap
-
-    def b(s):
-        return s
-
-    def exec_(func_text, globals_, lcl=None):
-        if lcl is None:
-            exec("exec func_text in globals_")
-        else:
-            exec("exec func_text in globals_, lcl")
-
-    def iterbytes(buf):
-        return (ord(byte) for byte in buf)
-
-    def import_(*args):
-        if len(args) == 4:
-            args = args[0:3] + ([str(arg) for arg in args[3]],)
-	return __import__(*args)
-
-    def print_(*args, **kwargs):
-        fp = kwargs.pop("file", sys.stdout)
-        if fp is None:
-            return
-        for arg in enumerate(args):
-            if not isinstance(arg, basestring):  # noqa
-                arg = str(arg)
-            fp.write(arg)
-
-    def u(s):
-        # this differs from what six does, which doesn't support non-ASCII
-        # strings - we only use u() with
-        # literal source strings, and all our source files with non-ascii
-        # in them (all are tests) are utf-8 encoded.
-        return unicode(s, "utf-8")  # noqa
-
-    def ue(s):
-        return unicode(s, "unicode_escape")  # noqa
-
-    def decode_backslashreplace(text, encoding):
-        try:
-            return text.decode(encoding)
-        except UnicodeDecodeError:
-            # regular "backslashreplace" for an incompatible encoding raises:
-            # "TypeError: don't know how to handle UnicodeDecodeError in
-            # error callback"
-            return repr(text)[1:-1].decode()
-
-    def safe_bytestring(text):
-        # py2k only
-        if not isinstance(text, string_types):
-            return unicode(text).encode("ascii", errors="backslashreplace")
-        elif isinstance(text, unicode):
-            return text.encode("ascii", errors="backslashreplace")
-        else:
-            return text
-
-    # not as nice as that of Py3K, but at least preserves
-    # the code line where the issue occurred
-    exec(
-        "def reraise(tp, value, tb=None, cause=None):\n"
-        "    if cause is not None:\n"
-        "        assert cause is not value, 'Same cause emitted'\n"
-        "    raise tp, value, tb\n"
-    )
-
-
-if py35:
-    from inspect import formatannotation
-
-    def inspect_formatargspec(
+    return FullArgSpec(
         args,
-        varargs=None,
-        varkw=None,
-        defaults=None,
-        kwonlyargs=(),
-        kwonlydefaults={},
-        annotations={},
-        formatarg=str,
-        formatvarargs=lambda name: "*" + name,
-        formatvarkw=lambda name: "**" + name,
-        formatvalue=lambda value: "=" + repr(value),
-        formatreturns=lambda text: " -> " + text,
-        formatannotation=formatannotation,
-    ):
-        """Copy formatargspec from python 3.7 standard library.
+        varargs,
+        varkw,
+        func.__defaults__,
+        kwonlyargs,
+        func.__kwdefaults__,
+        func.__annotations__,
+    )
 
-        Python 3 has deprecated formatargspec and requested that Signature
-        be used instead, however this requires a full reimplementation
-        of formatargspec() in terms of creating Parameter objects and such.
-        Instead of introducing all the object-creation overhead and having
-        to reinvent from scratch, just copy their compatibility routine.
 
-        Utimately we would need to rewrite our "decorator" routine completely
-        which is not really worth it right now, until all Python 2.x support
-        is dropped.
+if py39:
+    # python stubs don't have a public type for this. not worth
+    # making a protocol
+    def md5_not_for_security() -> Any:
+        return hashlib.md5(usedforsecurity=False)
 
-        """
+else:
 
-        def formatargandannotation(arg):
-            result = formatarg(arg)
-            if arg in annotations:
-                result += ": " + formatannotation(annotations[arg])
-            return result
+    def md5_not_for_security() -> Any:
+        return hashlib.md5()
 
-        specs = []
-        if defaults:
-            firstdefault = len(args) - len(defaults)
-        for i, arg in enumerate(args):
-            spec = formatargandannotation(arg)
-            if defaults and i >= firstdefault:
-                spec = spec + formatvalue(defaults[i - firstdefault])
-            specs.append(spec)
 
-        if varargs is not None:
-            specs.append(formatvarargs(formatargandannotation(varargs)))
-        else:
-            if kwonlyargs:
-                specs.append("*")
+if typing.TYPE_CHECKING or py38:
+    from importlib import metadata as importlib_metadata
+else:
+    import importlib_metadata  # noqa
 
-        if kwonlyargs:
-            for kwonlyarg in kwonlyargs:
-                spec = formatargandannotation(kwonlyarg)
-                if kwonlydefaults and kwonlyarg in kwonlydefaults:
-                    spec += formatvalue(kwonlydefaults[kwonlyarg])
-                specs.append(spec)
 
-        if varkw is not None:
-            specs.append(formatvarkw(formatargandannotation(varkw)))
+if typing.TYPE_CHECKING or py39:
+    # pep 584 dict union
+    dict_union = operator.or_  # noqa
+else:
 
-        result = "(" + ", ".join(specs) + ")"
-        if "return" in annotations:
-            result += formatreturns(formatannotation(annotations["return"]))
+    def dict_union(a: dict, b: dict) -> dict:
+        a = a.copy()
+        a.update(b)
+        return a
+
+
+if py310:
+    anext_ = anext
+else:
+    _NOT_PROVIDED = object()
+    from collections.abc import AsyncIterator
+
+    async def anext_(async_iterator, default=_NOT_PROVIDED):
+        """vendored from https://github.com/python/cpython/pull/8895"""
+
+        if not isinstance(async_iterator, AsyncIterator):
+            raise TypeError(
+                f"anext expected an AsyncIterator, got {type(async_iterator)}"
+            )
+        anxt = type(async_iterator).__anext__
+        try:
+            return await anxt(async_iterator)
+        except StopAsyncIteration:
+            if default is _NOT_PROVIDED:
+                raise
+            return default
+
+
+def importlib_metadata_get(group):
+    ep = importlib_metadata.entry_points()
+    if typing.TYPE_CHECKING or hasattr(ep, "select"):
+        return ep.select(group=group)
+    else:
+        return ep.get(group, ())
+
+
+def b(s):
+    return s.encode("latin-1")
+
+
+def b64decode(x: str) -> bytes:
+    return base64.b64decode(x.encode("ascii"))
+
+
+def b64encode(x: bytes) -> str:
+    return base64.b64encode(x).decode("ascii")
+
+
+def decode_backslashreplace(text: bytes, encoding: str) -> str:
+    return text.decode(encoding, errors="backslashreplace")
+
+
+def cmp(a, b):
+    return (a > b) - (a < b)
+
+
+def _formatannotation(annotation, base_module=None):
+    """vendored from python 3.7"""
+
+    if isinstance(annotation, str):
+        return annotation
+
+    if getattr(annotation, "__module__", None) == "typing":
+        return repr(annotation).replace("typing.", "").replace("~", "")
+    if isinstance(annotation, type):
+        if annotation.__module__ in ("builtins", base_module):
+            return repr(annotation.__qualname__)
+        return annotation.__module__ + "." + annotation.__qualname__
+    elif isinstance(annotation, typing.TypeVar):
+        return repr(annotation).replace("~", "")
+    return repr(annotation).replace("~", "")
+
+
+def inspect_formatargspec(
+    args: List[str],
+    varargs: Optional[str] = None,
+    varkw: Optional[str] = None,
+    defaults: Optional[Sequence[Any]] = None,
+    kwonlyargs: Optional[Sequence[str]] = (),
+    kwonlydefaults: Optional[Mapping[str, Any]] = {},
+    annotations: Mapping[str, Any] = {},
+    formatarg: Callable[[str], str] = str,
+    formatvarargs: Callable[[str], str] = lambda name: "*" + name,
+    formatvarkw: Callable[[str], str] = lambda name: "**" + name,
+    formatvalue: Callable[[Any], str] = lambda value: "=" + repr(value),
+    formatreturns: Callable[[Any], str] = lambda text: " -> " + str(text),
+    formatannotation: Callable[[Any], str] = _formatannotation,
+) -> str:
+    """Copy formatargspec from python 3.7 standard library.
+
+    Python 3 has deprecated formatargspec and requested that Signature
+    be used instead, however this requires a full reimplementation
+    of formatargspec() in terms of creating Parameter objects and such.
+    Instead of introducing all the object-creation overhead and having
+    to reinvent from scratch, just copy their compatibility routine.
+
+    Ultimately we would need to rewrite our "decorator" routine completely
+    which is not really worth it right now, until all Python 2.x support
+    is dropped.
+
+    """
+
+    kwonlydefaults = kwonlydefaults or {}
+    annotations = annotations or {}
+
+    def formatargandannotation(arg):
+        result = formatarg(arg)
+        if arg in annotations:
+            result += ": " + formatannotation(annotations[arg])
         return result
 
+    specs = []
+    if defaults:
+        firstdefault = len(args) - len(defaults)
+    else:
+        firstdefault = -1
 
-elif py2k:
-    from inspect import formatargspec as _inspect_formatargspec
+    for i, arg in enumerate(args):
+        spec = formatargandannotation(arg)
+        if defaults and i >= firstdefault:
+            spec = spec + formatvalue(defaults[i - firstdefault])
+        specs.append(spec)
 
-    def inspect_formatargspec(*spec, **kw):
-        # convert for a potential FullArgSpec from compat.getfullargspec()
-        return _inspect_formatargspec(*spec[0:4], **kw)  # noqa
+    if varargs is not None:
+        specs.append(formatvarargs(formatargandannotation(varargs)))
+    else:
+        if kwonlyargs:
+            specs.append("*")
 
+    if kwonlyargs:
+        for kwonlyarg in kwonlyargs:
+            spec = formatargandannotation(kwonlyarg)
+            if kwonlydefaults and kwonlyarg in kwonlydefaults:
+                spec += formatvalue(kwonlydefaults[kwonlyarg])
+            specs.append(spec)
 
-else:
-    from inspect import formatargspec as inspect_formatargspec  # noqa
+    if varkw is not None:
+        specs.append(formatvarkw(formatargandannotation(varkw)))
 
-
-if win32 or jython:
-    time_func = time.clock
-else:
-    time_func = time.time
-
-# Fix deprecation of accessing ABCs straight from collections module
-# (which will stop working in 3.8).
-if py33:
-    import collections.abc as collections_abc
-else:
-    import collections as collections_abc  # noqa
-
-
-@contextlib.contextmanager
-def nested(*managers):
-    """Implement contextlib.nested, mostly for unit tests.
-
-    As tests still need to run on py2.6 we can't use multiple-with yet.
-
-    Function is removed in py3k but also emits deprecation warning in 2.7
-    so just roll it here for everyone.
-
-    """
-
-    exits = []
-    vars_ = []
-    exc = (None, None, None)
-    try:
-        for mgr in managers:
-            exit_ = mgr.__exit__
-            enter = mgr.__enter__
-            vars_.append(enter())
-            exits.append(exit_)
-        yield vars_
-    except:
-        exc = sys.exc_info()
-    finally:
-        while exits:
-            exit_ = exits.pop()  # noqa
-            try:
-                if exit_(*exc):
-                    exc = (None, None, None)
-            except:
-                exc = sys.exc_info()
-        if exc != (None, None, None):
-            reraise(exc[0], exc[1], exc[2])
+    result = "(" + ", ".join(specs) + ")"
+    if "return" in annotations:
+        result += formatreturns(formatannotation(annotations["return"]))
+    return result
 
 
-def raise_from_cause(exception, exc_info=None):
-    if exc_info is None:
-        exc_info = sys.exc_info()
-    exc_type, exc_value, exc_tb = exc_info
-    cause = exc_value if exc_value is not exception else None
-    reraise(type(exception), exception, tb=exc_tb, cause=cause)
+def dataclass_fields(cls: Type[Any]) -> Iterable[dataclasses.Field[Any]]:
+    """Return a sequence of all dataclasses.Field objects associated
+    with a class as an already processed dataclass.
 
-
-def with_metaclass(meta, *bases):
-    """Create a base class with a metaclass.
-
-    Drops the middle class upon creation.
-
-    Source: http://lucumr.pocoo.org/2013/5/21/porting-to-python-3-redux/
+    The class must **already be a dataclass** for Field objects to be returned.
 
     """
 
-    class metaclass(meta):
-        __call__ = type.__call__
-        __init__ = type.__init__
+    if dataclasses.is_dataclass(cls):
+        return dataclasses.fields(cls)
+    else:
+        return []
 
-        def __new__(cls, name, this_bases, d):
-            if this_bases is None:
-                return type.__new__(cls, name, (), d)
-            return meta(name, bases, d)
 
-    return metaclass("temporary_class", None, {})
+def local_dataclass_fields(cls: Type[Any]) -> Iterable[dataclasses.Field[Any]]:
+    """Return a sequence of all dataclasses.Field objects associated with
+    an already processed dataclass, excluding those that originate from a
+    superclass.
+
+    The class must **already be a dataclass** for Field objects to be returned.
+
+    """
+
+    if dataclasses.is_dataclass(cls):
+        super_fields: Set[dataclasses.Field[Any]] = set()
+        for sup in cls.__bases__:
+            super_fields.update(dataclass_fields(sup))
+        return [f for f in dataclasses.fields(cls) if f not in super_fields]
+    else:
+        return []

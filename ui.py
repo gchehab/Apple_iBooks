@@ -43,7 +43,6 @@ class InterfacePlugin(InterfaceAction):
         # should pass a list of names to get_icons. In this case, get_icons
         # will return a dictionary mapping names to QIcons. Names that
         # are not found in the zip file will result in null QIcons.
-
         self.sync_selected_action = self.create_action(
             spec=('Sync selected books', None, None, None),
             attr='Sync selected books'
@@ -56,9 +55,17 @@ class InterfacePlugin(InterfaceAction):
         )
         self.sync_all_action.triggered.connect(self.sync_all)
 
+        self.remove_all_action = self.create_action(
+            spec=(Remove all calibre books', None, None, None),
+            attr='Remove all calibre books'
+        )
+        self.remove_all_action.triggered.connect(self.remove_all)
+
+
         self.menu = QMenu(self.gui)
         self.menu.addAction(self.sync_selected_action)
         self.menu.addAction(self.sync_all_action)
+        self.menu.addAction(self.remove_all_action)
         self.menu.aboutToShow.connect(self.update_menu)
 
         # The qaction is automatically created from the action_spec defined

@@ -1,3 +1,11 @@
+# dialects/sqlite/json.py
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
+# <see AUTHORS file>
+#
+# This module is part of SQLAlchemy and is released under
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
+
 from ... import types as sqltypes
 
 
@@ -9,18 +17,24 @@ class JSON(sqltypes.JSON):
     `loadable extension <https://www.sqlite.org/loadext.html>`_ and as such
     may not be available, or may require run-time loading.
 
-    The :class:`.sqlite.JSON` type supports persistence of JSON values
-    as well as the core index operations provided by :class:`.types.JSON`
+    :class:`_sqlite.JSON` is used automatically whenever the base
+    :class:`_types.JSON` datatype is used against a SQLite backend.
+
+    .. seealso::
+
+        :class:`_types.JSON` - main documentation for the generic
+        cross-platform JSON datatype.
+
+    The :class:`_sqlite.JSON` type supports persistence of JSON values
+    as well as the core index operations provided by :class:`_types.JSON`
     datatype, by adapting the operations to render the ``JSON_EXTRACT``
     function wrapped in the ``JSON_QUOTE`` function at the database level.
     Extracted values are quoted in order to ensure that the results are
     always JSON string values.
 
+
     .. versionadded:: 1.3
 
-    .. seealso::
-
-        JSON1_
 
     .. _JSON1: https://www.sqlite.org/json1.html
 
@@ -30,7 +44,7 @@ class JSON(sqltypes.JSON):
 # Note: these objects currently match exactly those of MySQL, however since
 # these are not generalizable to all JSON implementations, remain separately
 # implemented for each dialect.
-class _FormatTypeMixin(object):
+class _FormatTypeMixin:
     def _format_value(self, value):
         raise NotImplementedError()
 

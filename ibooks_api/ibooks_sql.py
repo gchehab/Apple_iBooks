@@ -273,8 +273,8 @@ class BkLibraryDb:
                     ZMODIFICATIONDATE=datetime.now(),
                     ZLASTOPENDATE=-63114076800,
                     ZVERSIONNUMBER='0.0',
-                    ZASSETID=asset_id if asset_id is not None else str(
-                        uuid5(NAMESPACE_X500, (title + author).encode('ascii', 'ignore'))).upper(),
+                    ZASSETID=asset_id if asset_id is not None else 
+                        uuid5(NAMESPACE_X500, (title + author)),
                     ZGENRE=genre,
                     ZDATASOURCEIDENTIFIER='com.apple.ibooks.plugin.Bookshelf.platformDataSource.BookKit',
                     ZAUTHOR=author,
@@ -403,8 +403,8 @@ class BkLibraryDb:
 
             self.__session.flush()
             if prefs['debug']:
-                print str(datetime.now()) + ": Books in library assets table: " + str(count)
-                print str(datetime.now()) + ": Books in collection member table: " + str(len(asset_ids))
+                print (str(datetime.now()) + ": Books in library assets table: " + str(count))
+                print (str(datetime.now()) + ": Books in collection member table: " + str(len(asset_ids)))
             return len(asset_ids)
 
         except Exception:
@@ -436,12 +436,13 @@ class BkLibraryDb:
                     self.__session.commit()
                 return result[0]
             else:
+                print (collection_name, type(collection_name))
                 new = self.__base.classes.ZBKCOLLECTION(
                     Z_OPT=1,
                     Z_ENT=1,
                     ZTITLE=collection_name,
                     ZCOLLECTIONID=collection_id if collection_id is not None else
-                        str(uuid5(NAMESPACE_X500, collection_name.encode('ascii', 'ignore'))).upper(),
+                        str(uuid5(NAMESPACE_X500, collection_name)).upper(),
                     ZLASTMODIFICATION=datetime.now(),
                     ZDELETEDFLAG=0,
                     ZSORTKEY=10000,
